@@ -1,6 +1,6 @@
 [package]
 name = "skilldeck"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Cross-platform CLI for installing agent skills from Git-backed catalogs"
@@ -22,6 +22,7 @@ clap = { version = "4", features = ["derive", "env"] }
 directories = "5"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 strsim = "0.11"
 tempfile = "3"
 thiserror = "1"

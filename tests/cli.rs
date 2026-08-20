@@ -1047,3 +1047,306 @@ fn install_group_source_failure_happens_before_destructive_overwrite() {
     );
     assert!(!root.join("bad").exists());
 }
+
+#[test]
+fn init_validates_catalog_prints_summary_and_preserves_old_config_on_failure() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let good = Fixture::new();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["init", "--yes", "--repository"])
+        .arg(&good.catalog)
+        .args(["--reference", "master"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Found 3 skills and 1 groups"));
+    let config_path = cfg.join("config.toml");
+    let before = fs::read(&config_path).unwrap();
+
+    let bad = tmp.path().join("bad-missing-skill-md");
+    fs::create_dir_all(bad.join("skills/broken")).unwrap();
+    no_external_skills(&bad);
+    no_skill_groups(&bad);
+    commit_repo(&bad);
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["init", "--yes", "--force", "--repository"])
+        .arg(&bad)
+        .args(["--reference", "master"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("zero skills"));
+    assert_eq!(fs::read(&config_path).unwrap(), before);
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["init", "--yes", "--force", "--repository"])
+        .arg(&good.catalog)
+        .args(["--reference", "missing-ref"])
+        .assert()
+        .failure();
+    assert_eq!(fs::read(&config_path).unwrap(), before);
+}
+
+type CatalogBuilder = Box<dyn Fn(&Path)>;
+
+#[test]
+fn init_rejects_structural_catalog_errors_and_preserves_config() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let good = make_catalog(tmp.path(), "good", "ok", "ok");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["init", "--yes", "--repository"])
+        .arg(&good)
+        .args(["--reference", "master"])
+        .assert()
+        .success();
+    let config_path = cfg.join("config.toml");
+    let before = fs::read(&config_path).unwrap();
+
+    let cases: Vec<(&str, CatalogBuilder)> = vec![
+        (
+            "malformed-ext",
+            Box::new(|c| {
+                fs::create_dir_all(c.join("skills/ok")).unwrap();
+                fs::write(c.join("skills/ok/SKILL.md"), "ok").unwrap();
+                fs::write(c.join("external-skills.toml"), "[skills.\"x\"\nsource = ").unwrap();
+                no_skill_groups(c);
+            }),
+        ),
+        (
+            "malformed-groups",
+            Box::new(|c| {
+                fs::create_dir_all(c.join("skills/ok")).unwrap();
+                fs::write(c.join("skills/ok/SKILL.md"), "ok").unwrap();
+                no_external_skills(c);
+                fs::write(c.join("skill-groups.toml"), "[groups.\"x\"\nskills = ").unwrap();
+            }),
+        ),
+        (
+            "unsafe-path",
+            Box::new(|c| {
+                fs::create_dir_all(c).unwrap();
+                write_external_skills(
+                    c,
+                    vec![(
+                        "x",
+                        TestExternalSkill {
+                            source: "repo".into(),
+                            subdirectory: Some("../x".into()),
+                            reference: None,
+                        },
+                    )],
+                );
+                no_skill_groups(c);
+            }),
+        ),
+        (
+            "empty-source",
+            Box::new(|c| {
+                fs::create_dir_all(c).unwrap();
+                write_external_skills(
+                    c,
+                    vec![(
+                        "x",
+                        TestExternalSkill {
+                            source: "".into(),
+                            subdirectory: None,
+                            reference: None,
+                        },
+                    )],
+                );
+                no_skill_groups(c);
+            }),
+        ),
+        (
+            "duplicate",
+            Box::new(|c| {
+                fs::create_dir_all(c.join("skills/x")).unwrap();
+                fs::write(c.join("skills/x/SKILL.md"), "x").unwrap();
+                write_external_skills(
+                    c,
+                    vec![(
+                        "x",
+                        TestExternalSkill {
+                            source: "repo".into(),
+                            subdirectory: None,
+                            reference: None,
+                        },
+                    )],
+                );
+                no_skill_groups(c);
+            }),
+        ),
+        (
+            "empty-group",
+            Box::new(|c| {
+                fs::create_dir_all(c.join("skills/x")).unwrap();
+                fs::write(c.join("skills/x/SKILL.md"), "x").unwrap();
+                no_external_skills(c);
+                write_skill_groups(c, vec![("g", "")]);
+            }),
+        ),
+        (
+            "dup-member",
+            Box::new(|c| {
+                fs::create_dir_all(c.join("skills/x")).unwrap();
+                fs::write(c.join("skills/x/SKILL.md"), "x").unwrap();
+                no_external_skills(c);
+                write_skill_groups(c, vec![("g", "x x")]);
+            }),
+        ),
+        (
+            "missing-member",
+            Box::new(|c| {
+                fs::create_dir_all(c.join("skills/x")).unwrap();
+                fs::write(c.join("skills/x/SKILL.md"), "x").unwrap();
+                no_external_skills(c);
+                write_skill_groups(c, vec![("g", "missing")]);
+            }),
+        ),
+        (
+            "zero",
+            Box::new(|c| {
+                fs::create_dir_all(c).unwrap();
+                no_external_skills(c);
+                no_skill_groups(c);
+            }),
+        ),
+    ];
+
+    for (name, build) in cases {
+        let cat = tmp.path().join(name);
+        build(&cat);
+        commit_repo(&cat);
+        bin()
+            .env("SKILLDECK_CONFIG_DIR", &cfg)
+            .args(["init", "--yes", "--force", "--repository"])
+            .arg(&cat)
+            .args(["--reference", "master"])
+            .assert()
+            .failure();
+        assert_eq!(
+            fs::read(&config_path).unwrap(),
+            before,
+            "{name} changed config"
+        );
+    }
+}
+
+#[test]
+fn list_human_json_and_precedence_are_sorted() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let config_cat = make_catalog(tmp.path(), "config-cat", "config-only", "c");
+    let env_cat = make_catalog(tmp.path(), "env-cat", "env-only", "e");
+    let cli_cat = make_catalog(tmp.path(), "cli-cat", "cli-only", "c");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["init", "--yes", "--repository"])
+        .arg(&config_cat)
+        .args(["--reference", "master"])
+        .assert()
+        .success();
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .env("SKILLDECK_CATALOG_REPOSITORY", &env_cat)
+        .env("SKILLDECK_CATALOG_REF", "master")
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("env-only"))
+        .stdout(predicate::str::contains("[first-party]"));
+
+    let out = bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .env("SKILLDECK_CATALOG_REPOSITORY", &env_cat)
+        .env("SKILLDECK_CATALOG_REF", "master")
+        .args(["list", "--catalog-repository"])
+        .arg(&cli_cat)
+        .args(["--catalog-ref", "master", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(json["skills"][0]["name"], "cli-only");
+    assert_eq!(json["counts"]["total_skill_count"], 1);
+}
+
+#[test]
+fn doctor_structural_and_deep_validation() {
+    let tmp = TempDir::new().unwrap();
+    let ext_repo = tmp.path().join("extrepo");
+    fs::create_dir_all(&ext_repo).unwrap();
+    fs::write(ext_repo.join("SKILL.md"), "ext").unwrap();
+    commit_repo(&ext_repo);
+    let md_url = spawn_http(200, "# skill");
+    let catalog = tmp.path().join("doctor-cat");
+    fs::create_dir_all(catalog.join("skills/local")).unwrap();
+    fs::write(catalog.join("skills/local/SKILL.md"), "local").unwrap();
+    write_external_skills(
+        &catalog,
+        vec![
+            (
+                "gitext",
+                TestExternalSkill {
+                    source: ext_repo.display().to_string(),
+                    subdirectory: None,
+                    reference: None,
+                },
+            ),
+            (
+                "md",
+                TestExternalSkill {
+                    source: md_url,
+                    subdirectory: None,
+                    reference: None,
+                },
+            ),
+        ],
+    );
+    write_skill_groups(&catalog, vec![("all", "local gitext md")]);
+    commit_repo(&catalog);
+    bin()
+        .env("SKILLDECK_CATALOG_REPOSITORY", &catalog)
+        .env("SKILLDECK_CATALOG_REF", "master")
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Catalog structure: ok"));
+    bin()
+        .env("SKILLDECK_CATALOG_REPOSITORY", &catalog)
+        .env("SKILLDECK_CATALOG_REF", "master")
+        .args(["doctor", "--deep"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("External gitext: ok"));
+
+    let bad = tmp.path().join("bad-deep");
+    fs::create_dir_all(&bad).unwrap();
+    write_external_skills(
+        &bad,
+        vec![(
+            "bad",
+            TestExternalSkill {
+                source: ext_repo.display().to_string(),
+                subdirectory: Some("missing".into()),
+                reference: None,
+            },
+        )],
+    );
+    no_skill_groups(&bad);
+    commit_repo(&bad);
+    bin()
+        .env("SKILLDECK_CATALOG_REPOSITORY", &bad)
+        .env("SKILLDECK_CATALOG_REF", "master")
+        .args(["doctor", "--deep"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("subdirectory"));
+}

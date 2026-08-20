@@ -5,13 +5,13 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use strsim::jaro_winkler;
 use tempfile::TempDir;
 
 use crate::{config::Config, git};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExternalSkill {
     pub source: String,
     #[serde(default)]
@@ -35,11 +35,26 @@ struct Group {
     skills: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillEntry {
+    pub name: String,
+    pub source_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogSummary {
+    pub first_party_count: usize,
+    pub external_count: usize,
+    pub group_count: usize,
+    pub total_skill_count: usize,
+}
+
 pub struct Catalog {
     _temp: TempDir,
     root: PathBuf,
     externals: BTreeMap<String, ExternalSkill>,
     groups: BTreeMap<String, Vec<String>>,
+    first_party: BTreeMap<String, PathBuf>,
 }
 
 impl Catalog {
@@ -51,22 +66,27 @@ impl Catalog {
         Self::open(temp, root)
     }
 
-    fn open(temp: TempDir, root: PathBuf) -> Result<Self> {
+    pub fn open(temp: TempDir, root: PathBuf) -> Result<Self> {
         let externals = read_externals(&root)?;
         let groups = read_groups(&root)?;
+        let first_party = read_first_party(&root)?;
         Ok(Self {
             _temp: temp,
             root,
             externals,
             groups,
+            first_party,
         })
     }
 
     pub fn first_party_path(&self, name: &str) -> PathBuf {
-        self.root.join("skills").join(name)
+        self.first_party
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| self.root.join("skills").join(name))
     }
     pub fn has_first_party(&self, name: &str) -> bool {
-        self.first_party_path(name).is_dir()
+        self.first_party.contains_key(name)
     }
     pub fn external(&self, name: &str) -> Option<&ExternalSkill> {
         self.externals.get(name)
@@ -79,13 +99,7 @@ impl Catalog {
     }
     pub fn skill_names(&self) -> Vec<String> {
         let mut names: Vec<_> = self.externals.keys().cloned().collect();
-        if let Ok(entries) = fs::read_dir(self.root.join("skills")) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    names.push(e.file_name().to_string_lossy().into_owned());
-                }
-            }
-        }
+        names.extend(self.first_party.keys().cloned());
         names.sort();
         names.dedup();
         names
@@ -93,6 +107,127 @@ impl Catalog {
     pub fn group_names(&self) -> Vec<String> {
         self.groups.keys().cloned().collect()
     }
+    pub fn skills(&self) -> Vec<SkillEntry> {
+        let mut skills: Vec<_> = self
+            .first_party
+            .keys()
+            .map(|name| SkillEntry {
+                name: name.clone(),
+                source_type: "first-party".into(),
+            })
+            .chain(self.externals.keys().map(|name| SkillEntry {
+                name: name.clone(),
+                source_type: "external".into(),
+            }))
+            .collect();
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        skills
+    }
+    pub fn groups(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.groups
+    }
+    pub fn externals(&self) -> &BTreeMap<String, ExternalSkill> {
+        &self.externals
+    }
+    pub fn summary(&self) -> CatalogSummary {
+        CatalogSummary {
+            first_party_count: self.first_party.len(),
+            external_count: self.externals.len(),
+            group_count: self.groups.len(),
+            total_skill_count: self.first_party.len() + self.externals.len(),
+        }
+    }
+    pub fn validate(&self) -> Result<CatalogSummary> {
+        let mut issues = Vec::new();
+        for name in self.first_party.keys() {
+            if let Err(e) = validate_name(name, "skill") {
+                issues.push(e.to_string());
+            }
+            if self.externals.contains_key(name) {
+                issues.push(format!("duplicate first-party/external skill name: {name}"));
+            }
+            if !self.first_party_path(name).join("SKILL.md").is_file() {
+                issues.push(format!("first-party skill {name} is missing SKILL.md"));
+            }
+        }
+        for (name, ext) in &self.externals {
+            if let Err(e) = validate_name(name, "skill") {
+                issues.push(e.to_string());
+            }
+            if ext.source.trim().is_empty() {
+                issues.push(format!("external skill {name} has empty source"));
+            }
+            if let Some(path) = ext
+                .subdirectory
+                .as_deref()
+                .filter(|p| !p.is_empty() && *p != "-")
+            {
+                if let Err(e) = safe_relative_path(path) {
+                    issues.push(format!("external skill {name}: {e}"));
+                }
+            }
+        }
+        for (group, members) in &self.groups {
+            if let Err(e) = validate_name(group, "group") {
+                issues.push(e.to_string());
+            }
+            if members.is_empty() {
+                issues.push(format!("group {group} is empty"));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for member in members {
+                if !seen.insert(member) {
+                    issues.push(format!("group {group} has duplicate member {member}"));
+                }
+                if let Err(e) = validate_name(member, "skill") {
+                    issues.push(format!("group {group}: {e}"));
+                }
+                if !self.has_skill(member) {
+                    issues.push(format!("group {group} references missing skill {member}"));
+                }
+            }
+        }
+        if self.first_party.is_empty() && self.externals.is_empty() {
+            issues.push("catalog contains zero skills".into());
+        }
+        if issues.is_empty() {
+            Ok(self.summary())
+        } else {
+            Err(anyhow!(
+                "catalog validation failed:\n- {}",
+                issues.join("\n- ")
+            ))
+        }
+    }
+}
+
+fn read_first_party(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
+    let mut out = BTreeMap::new();
+    let skills = root.join("skills");
+    if !skills.exists() {
+        return Ok(out);
+    }
+    let entries = fs::read_dir(&skills)
+        .with_context(|| format!("reading first-party skills directory {}", skills.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "reading an entry in first-party skills directory {}",
+                skills.display()
+            )
+        })?;
+        let file_type = entry.file_type().with_context(|| {
+            format!(
+                "reading file type for first-party skill candidate {}",
+                entry.path().display()
+            )
+        })?;
+        if file_type.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            out.insert(name, entry.path());
+        }
+    }
+    Ok(out)
 }
 
 fn read_externals(root: &Path) -> Result<BTreeMap<String, ExternalSkill>> {
@@ -101,7 +236,7 @@ fn read_externals(root: &Path) -> Result<BTreeMap<String, ExternalSkill>> {
         return Ok(BTreeMap::new());
     }
     let parsed: ExternalSkills = toml::from_str(&fs::read_to_string(&path)?)
-        .with_context(|| format!("parsing {}", path.display()))?;
+        .with_context(|| format!("parsing external-skills.toml at {}", path.display()))?;
     Ok(parsed.skills)
 }
 
@@ -111,7 +246,7 @@ fn read_groups(root: &Path) -> Result<BTreeMap<String, Vec<String>>> {
         return Ok(BTreeMap::new());
     }
     let parsed: SkillGroups = toml::from_str(&fs::read_to_string(&path)?)
-        .with_context(|| format!("parsing {}", path.display()))?;
+        .with_context(|| format!("parsing skill-groups.toml at {}", path.display()))?;
     Ok(parsed
         .groups
         .into_iter()
@@ -178,6 +313,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("catalog");
         fs::create_dir_all(root.join("skills/first")).unwrap();
+        fs::write(root.join("skills/first/SKILL.md"), "first").unwrap();
         fs::write(root.join("external-skills.toml"), "[skills.\"ext\"]\nsource = \"https://example.com/x.git\"\nsubdirectory = \"s\"\nref = \"main\"\n").unwrap();
         fs::write(
             root.join("skill-groups.toml"),
@@ -194,5 +330,61 @@ mod tests {
             catalog.group("g").unwrap(),
             &vec!["first".to_string(), "ext".to_string()]
         );
+    }
+
+    #[test]
+    fn first_party_missing_skill_md_is_reported_by_name() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("catalog");
+        fs::create_dir_all(root.join("skills/broken")).unwrap();
+        fs::write(root.join("external-skills.toml"), "").unwrap();
+        fs::write(root.join("skill-groups.toml"), "").unwrap();
+        let catalog = Catalog::open(tmp, root).unwrap();
+        let err = catalog.validate().unwrap_err().to_string();
+        assert!(err.contains("first-party skill broken is missing SKILL.md"));
+    }
+
+    #[test]
+    fn nested_skill_md_does_not_create_extra_catalog_skill() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("catalog");
+        fs::create_dir_all(root.join("skills/parent/nested")).unwrap();
+        fs::write(root.join("skills/parent/SKILL.md"), "parent").unwrap();
+        fs::write(root.join("skills/parent/nested/SKILL.md"), "nested").unwrap();
+        fs::write(root.join("external-skills.toml"), "").unwrap();
+        fs::write(root.join("skill-groups.toml"), "").unwrap();
+        let catalog = Catalog::open(tmp, root).unwrap();
+        let summary = catalog.validate().unwrap();
+        assert_eq!(summary.first_party_count, 1);
+        assert_eq!(catalog.skill_names(), vec!["parent".to_string()]);
+        assert_eq!(catalog.skills()[0].name, "parent");
+    }
+
+    #[test]
+    fn invalid_immediate_first_party_name_is_reported() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("catalog");
+        fs::create_dir_all(root.join("skills/bad name")).unwrap();
+        fs::write(root.join("skills/bad name/SKILL.md"), "bad").unwrap();
+        fs::write(root.join("external-skills.toml"), "").unwrap();
+        fs::write(root.join("skill-groups.toml"), "").unwrap();
+        let catalog = Catalog::open(tmp, root).unwrap();
+        let err = catalog.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid skill name: bad name"));
+    }
+
+    #[test]
+    fn first_party_read_dir_errors_are_contextual() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("catalog");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("skills"), "not a directory").unwrap();
+        fs::write(root.join("external-skills.toml"), "").unwrap();
+        fs::write(root.join("skill-groups.toml"), "").unwrap();
+        let err = match Catalog::open(tmp, root) {
+            Ok(_) => panic!("expected first-party read_dir error"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("reading first-party skills directory"));
     }
 }

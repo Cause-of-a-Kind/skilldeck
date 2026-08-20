@@ -4,17 +4,17 @@ Skilldeck is a public, open-source CLI for installing agent skills from Git-back
 
 ## Install
 
-Install the latest v0.1.0 GitHub Release on Linux/macOS with the generated shell installer:
+Install the latest v0.1.1 GitHub Release on Linux/macOS with the generated shell installer:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.0/skilldeck-installer.sh | sh
+  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.1/skilldeck-installer.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.0/skilldeck-installer.ps1 | iex
+irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.1/skilldeck-installer.ps1 | iex
 ```
 
 Security note: piping installers directly to a shell is convenient but optional. If you prefer, download the installer or release archive first, inspect it, verify the `.sha256` file or `sha256.sum`, and then run it locally.
@@ -84,6 +84,10 @@ skilldeck update fin ./skills
 skilldeck update ./skills
 skilldeck remove fin ./skills
 skilldeck remove-group rails ./skills
+skilldeck list
+skilldeck list --json
+skilldeck doctor
+skilldeck doctor --deep
 skilldeck help
 skilldeck version
 ```
@@ -122,10 +126,10 @@ Behavioral coverage is enforced with unit/integration tests and measured with [`
 cargo llvm-cov --workspace --all-targets --all-features --summary-only --fail-under-lines 85
 ```
 
-The initial measured coverage on Linux is 86.99% line coverage, 84.69% function coverage, and 82.84% region coverage. Branch coverage is not reported by the current Rust/LLVM setup for this crate. CI enforces the line threshold while prioritizing meaningful release-risk behavior over artificial assertions.
+The initial measured coverage on Linux is 86.61% line coverage, 83.74% function coverage, and 83.20% region coverage. Branch coverage is not reported by the current Rust/LLVM setup for this crate. CI enforces the line threshold while prioritizing meaningful release-risk behavior over artificial assertions.
 
 ## Release approach
 
-GitHub Releases are configured with cargo-dist 0.32.0. Pushing a version tag such as `v0.1.0` runs the release workflow, builds archives for the supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
+GitHub Releases are configured with cargo-dist 0.32.0. Pushing a version tag such as `v0.1.1` runs the release workflow, builds archives for the supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
 
 crates.io publishing remains disabled for the initial release while the CLI surface stabilizes.

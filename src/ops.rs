@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
+use serde::Serialize;
 use tempfile::TempDir;
 
 use crate::{
@@ -43,6 +44,8 @@ pub fn init(args: InitArgs) -> Result<()> {
         catalog_repository: repo,
         catalog_ref: reference,
     };
+    let catalog = Catalog::clone_from_config(&cfg)?;
+    let summary = catalog.validate()?;
     let path = config::config_path()?;
     if path.exists()
         && !args.force
@@ -61,6 +64,13 @@ pub fn init(args: InitArgs) -> Result<()> {
     println!("Configured skilldeck catalog at {}", path.display());
     println!("repository = {}", cfg.catalog_repository);
     println!("ref = {}", cfg.catalog_ref);
+    println!(
+        "Found {} skills and {} groups. ({} first-party, {} external)",
+        summary.total_skill_count,
+        summary.group_count,
+        summary.first_party_count,
+        summary.external_count
+    );
     Ok(())
 }
 
@@ -218,6 +228,143 @@ pub fn remove(args: RemoveArgs) -> Result<()> {
             );
         }
     })
+}
+
+pub fn doctor(args: DoctorArgs) -> Result<()> {
+    let cfg = config::resolve(&args.overrides)?;
+    let catalog = Catalog::clone_from_config(&cfg)?;
+    let summary = catalog.validate()?;
+    println!("Catalog structure: ok");
+    println!(
+        "Found {} skills and {} groups. ({} first-party, {} external)",
+        summary.total_skill_count,
+        summary.group_count,
+        summary.first_party_count,
+        summary.external_count
+    );
+    if args.deep {
+        deep_validate(&catalog)?;
+    }
+    println!("Doctor complete: ok");
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ListOutput {
+    repository: String,
+    reference: String,
+    counts: crate::catalog::CatalogSummary,
+    skills: Vec<crate::catalog::SkillEntry>,
+    groups: Vec<ListGroup>,
+}
+
+#[derive(Serialize)]
+struct ListGroup {
+    name: String,
+    members: Vec<String>,
+}
+
+pub fn list(args: ListArgs) -> Result<()> {
+    let cfg = config::resolve(&args.overrides)?;
+    let catalog = Catalog::clone_from_config(&cfg)?;
+    let counts = catalog.validate()?;
+    let skills = catalog.skills();
+    let groups: Vec<_> = catalog
+        .groups()
+        .iter()
+        .map(|(name, members)| ListGroup {
+            name: name.clone(),
+            members: members.clone(),
+        })
+        .collect();
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ListOutput {
+                repository: cfg.catalog_repository,
+                reference: cfg.catalog_ref,
+                counts,
+                skills,
+                groups
+            })?
+        );
+    } else {
+        println!(
+            "Found {} skills and {} groups. ({} first-party, {} external)",
+            counts.total_skill_count,
+            counts.group_count,
+            counts.first_party_count,
+            counts.external_count
+        );
+        println!("Skills:");
+        for skill in skills {
+            println!("  [{}] {}", skill.source_type, skill.name);
+        }
+        println!("Groups:");
+        for group in groups {
+            println!("  {}: {}", group.name, group.members.join(" "));
+        }
+    }
+    Ok(())
+}
+
+fn deep_validate(catalog: &Catalog) -> Result<()> {
+    let mut issues = Vec::new();
+    for (name, ext) in catalog.externals() {
+        print!("External {name}: ");
+        if fsops::is_markdown_url(&ext.source) {
+            match reqwest::blocking::get(&ext.source)
+                .and_then(|r| r.error_for_status())
+                .and_then(|r| r.text())
+            {
+                Ok(body) if !body.trim().is_empty() => println!("ok"),
+                Ok(_) => {
+                    println!("empty markdown");
+                    issues.push(format!("external {name}: markdown content is empty"));
+                }
+                Err(e) => {
+                    println!("failed");
+                    issues.push(format!("external {name}: {e}"));
+                }
+            }
+            continue;
+        }
+        let temp = TempDir::new()?;
+        let source_root = temp.path().join("source");
+        match git::clone_repository(&ext.source, ext.reference.as_deref(), &source_root) {
+            Ok(()) => {
+                let source = match ext
+                    .subdirectory
+                    .as_deref()
+                    .filter(|p| !p.is_empty() && *p != "-")
+                {
+                    Some(p) => source_root.join(p),
+                    None => source_root,
+                };
+                if !source.is_dir() {
+                    println!("missing subdirectory");
+                    issues.push(format!("external {name}: subdirectory not found"));
+                } else if !source.join("SKILL.md").is_file() {
+                    println!("missing SKILL.md");
+                    issues.push(format!("external {name}: resolved source missing SKILL.md"));
+                } else {
+                    println!("ok");
+                }
+            }
+            Err(e) => {
+                println!("failed");
+                issues.push(format!("external {name}: {e:#}"));
+            }
+        }
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "deep catalog validation failed:\n- {}",
+            issues.join("\n- ")
+        ))
+    }
 }
 
 pub fn remove_group(args: RemoveGroupArgs) -> Result<()> {

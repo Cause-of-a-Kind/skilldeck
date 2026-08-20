@@ -26,6 +26,8 @@ fn run() -> Result<()> {
         Commands::Update(args) => ops::update(args),
         Commands::Remove(args) => ops::remove(args),
         Commands::RemoveGroup(args) => ops::remove_group(args),
+        Commands::Doctor(args) => ops::doctor(args),
+        Commands::List(args) => ops::list(args),
         Commands::Version => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             Ok(())

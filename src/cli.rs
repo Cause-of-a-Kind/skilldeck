@@ -28,6 +28,10 @@ pub enum Commands {
     Remove(RemoveArgs),
     /// Remove currently installed members of a catalog group.
     RemoveGroup(RemoveGroupArgs),
+    /// Validate the configured catalog.
+    Doctor(DoctorArgs),
+    /// List catalog skills and groups.
+    List(ListArgs),
     /// Print the Skilldeck version.
     Version,
 }
@@ -108,4 +112,22 @@ pub struct RemoveGroupArgs {
     pub overrides: CatalogOverrideArgs,
     pub group: String,
     pub install_directory: PathBuf,
+}
+
+#[derive(Args, Debug)]
+pub struct DoctorArgs {
+    #[command(flatten)]
+    pub overrides: CatalogOverrideArgs,
+    /// Resolve all external Git/Markdown sources too.
+    #[arg(long)]
+    pub deep: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    #[command(flatten)]
+    pub overrides: CatalogOverrideArgs,
+    /// Print stable machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
