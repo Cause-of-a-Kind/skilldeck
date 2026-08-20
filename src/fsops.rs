@@ -143,7 +143,16 @@ where
         })?;
     }
 
-    before_final_rename()?;
+    if let Err(err) = before_final_rename() {
+        let _ = cleanup_path(dest);
+        if backup.exists() {
+            let _ = fs::rename(backup, dest);
+        }
+        let _ = cleanup_path(stage);
+        return Err(err)
+            .with_context(|| format!("preparing to move staged skill into {}", dest.display()));
+    }
+
     match fs::rename(stage, dest) {
         Ok(()) => {
             cleanup_path(backup)?;
@@ -187,12 +196,34 @@ mod tests {
         fs::write(stage.join("SKILL.md"), "new").unwrap();
 
         let result = swap_staged_with_hook(&stage, &dest, &backup, || {
-            fs::write(&dest, "block final rename")?;
+            fs::create_dir_all(&dest)?;
+            fs::write(dest.join("blocking-child"), "block final rename")?;
             Ok(())
         });
 
         assert!(result.is_err());
         assert_eq!(fs::read_to_string(dest.join("SKILL.md")).unwrap(), "old");
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn swap_rollback_restores_existing_on_hook_failure() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("skill");
+        let stage = tmp.path().join("stage");
+        let backup = tmp.path().join("backup");
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(dest.join("SKILL.md"), "old").unwrap();
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join("SKILL.md"), "new").unwrap();
+
+        let result = swap_staged_with_hook(&stage, &dest, &backup, || {
+            Err(anyhow!("injected hook failure"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(dest.join("SKILL.md")).unwrap(), "old");
+        assert!(!backup.exists());
+        assert!(!stage.exists());
     }
 }

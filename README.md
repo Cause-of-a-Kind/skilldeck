@@ -122,7 +122,7 @@ Behavioral coverage is enforced with unit/integration tests and measured with [`
 cargo llvm-cov --workspace --all-targets --all-features --summary-only --fail-under-lines 85
 ```
 
-The initial measured coverage on Linux is 87.45% line coverage, 84.21% function coverage, and 82.93% region coverage. Branch coverage is not reported by the current Rust/LLVM setup for this crate. CI enforces the line threshold while prioritizing meaningful release-risk behavior over artificial assertions.
+The initial measured coverage on Linux is 86.99% line coverage, 84.69% function coverage, and 82.84% region coverage. Branch coverage is not reported by the current Rust/LLVM setup for this crate. CI enforces the line threshold while prioritizing meaningful release-risk behavior over artificial assertions.
 
 ## Release approach
 
