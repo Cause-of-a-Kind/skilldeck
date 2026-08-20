@@ -1,0 +1,8 @@
+/target/
+/coverage/
+/lcov.info
+/cobertura.xml
+*.profraw
+**/*.rs.bk
+.DS_Store
+.env
