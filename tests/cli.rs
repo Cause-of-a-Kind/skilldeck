@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     path::Path,
     process::Command,
     sync::{
@@ -1455,7 +1455,7 @@ impl TestServer {
         let thread_alive = alive.clone();
         let handle = thread::spawn(move || {
             while thread_alive.load(Ordering::SeqCst) {
-                let (mut stream, _) = match listener.accept() {
+                let (stream, _) = match listener.accept() {
                     Ok(pair) => pair,
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -1463,35 +1463,7 @@ impl TestServer {
                     }
                     Err(_) => break,
                 };
-                let mut buf = [0u8; 4096];
-                let n = stream.read(&mut buf).unwrap_or(0);
-                let req = String::from_utf8_lossy(&buf[..n]);
-                let path = req
-                    .lines()
-                    .next()
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .unwrap_or("/")
-                    .to_string();
-                thread_hits.lock().unwrap().push(path.clone());
-                let route = routes.iter().find(|(p, _, _)| *p == path);
-                if let Some((_, body, ct)) = route {
-                    write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                        ct,
-                        body.len()
-                    ).unwrap();
-                    stream.write_all(body).unwrap();
-                } else {
-                    let body = b"not found";
-                    write!(
-                        stream,
-                        "HTTP/1.1 404 Not Found\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                        body.len()
-                    )
-                    .unwrap();
-                    stream.write_all(body).unwrap();
-                }
+                handle_test_server_client(stream, &routes, &thread_hits);
             }
         });
         Self {
@@ -1507,14 +1479,125 @@ impl TestServer {
     }
 }
 
+fn handle_test_server_client(
+    mut stream: TcpStream,
+    routes: &[(String, Vec<u8>, String)],
+    hits: &Arc<Mutex<Vec<String>>>,
+) {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+
+    let mut request = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => return,
+            Ok(n) => {
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|w| w == b"\r\n\r\n") || request.len() > 16 * 1024 {
+                    break;
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if request.is_empty() {
+                    return;
+                }
+                break;
+            }
+            Err(_) => return,
+        }
+    }
+
+    let req = String::from_utf8_lossy(&request);
+    let path = req
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap_or("/")
+        .to_string();
+    hits.lock().unwrap().push(path.clone());
+
+    let (status, body, ct): (&str, &[u8], &str) =
+        if let Some((_, body, ct)) = routes.iter().find(|(p, _, _)| *p == path) {
+            ("200 OK", body.as_slice(), ct.as_str())
+        } else {
+            ("404 Not Found", b"not found".as_slice(), "text/plain")
+        };
+    let head = format!(
+        "HTTP/1.1 {status}\r\ncontent-type: {ct}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = write_http_bytes(&mut stream, head.as_bytes());
+    let _ = write_http_bytes(&mut stream, body);
+    let _ = stream.flush();
+}
+
+fn write_http_bytes(stream: &mut TcpStream, mut bytes: &[u8]) -> std::io::Result<()> {
+    while !bytes.is_empty() {
+        match stream.write(bytes) {
+            Ok(0) => return Ok(()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
 impl Drop for TestServer {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::SeqCst);
-        let _ = std::net::TcpStream::connect(self.url.trim_start_matches("http://"));
+        let _ = TcpStream::connect(self.url.trim_start_matches("http://"));
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }
+}
+
+#[test]
+fn test_server_serves_complete_response_and_survives_disconnects() {
+    let body = b"hello from test server".to_vec();
+    let server = TestServer::new(vec![("/ok", body.clone(), "text/plain")]);
+
+    let _ = TcpStream::connect(server.url.trim_start_matches("http://"));
+
+    let mut stream = TcpStream::connect(server.url.trim_start_matches("http://")).unwrap();
+    stream
+        .write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 200 OK"), "{text}");
+    assert!(
+        text.contains(&format!("content-length: {}", body.len())),
+        "{text}"
+    );
+    assert!(response.ends_with(&body), "{text}");
+    assert!(server.hits().contains(&"/ok".to_string()));
 }
 
 fn release_json(base: &str, tag: &str, draft: bool, prerelease: bool, asset: &str) -> String {
