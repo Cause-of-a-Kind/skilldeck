@@ -1,6 +1,7 @@
-use std::{fs, path::Path, process::Command};
+use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
 use predicates::prelude::*;
+use serde::Serialize;
 use tempfile::TempDir;
 
 fn bin() -> assert_cmd::Command {
@@ -15,6 +16,14 @@ fn git(dir: &Path, args: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "git {:?} failed", args);
+}
+
+fn file_url(path: &Path) -> String {
+    let mut path = path.display().to_string().replace('\\', "/");
+    if !path.starts_with('/') {
+        path = format!("/{path}");
+    }
+    format!("file://{path}")
 }
 
 fn commit_repo(dir: &Path) {
@@ -39,12 +48,75 @@ fn commit_repo(dir: &Path) {
     );
 }
 
+#[derive(Serialize)]
+struct TestExternalSkills {
+    skills: BTreeMap<String, TestExternalSkill>,
+}
+
+#[derive(Serialize)]
+struct TestExternalSkill {
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subdirectory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
+    reference: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TestSkillGroups {
+    groups: BTreeMap<String, TestSkillGroup>,
+}
+
+#[derive(Serialize)]
+struct TestSkillGroup {
+    skills: String,
+}
+
+fn write_external_skills(catalog: &Path, skills: Vec<(&str, TestExternalSkill)>) {
+    let skills = skills
+        .into_iter()
+        .map(|(name, skill)| (name.to_string(), skill))
+        .collect();
+    fs::write(
+        catalog.join("external-skills.toml"),
+        toml::to_string(&TestExternalSkills { skills }).unwrap(),
+    )
+    .unwrap();
+}
+
+fn write_skill_groups(catalog: &Path, groups: Vec<(&str, &str)>) {
+    let groups = groups
+        .into_iter()
+        .map(|(name, skills)| {
+            (
+                name.to_string(),
+                TestSkillGroup {
+                    skills: skills.to_string(),
+                },
+            )
+        })
+        .collect();
+    fs::write(
+        catalog.join("skill-groups.toml"),
+        toml::to_string(&TestSkillGroups { groups }).unwrap(),
+    )
+    .unwrap();
+}
+
+fn no_external_skills(catalog: &Path) {
+    fs::write(catalog.join("external-skills.toml"), "").unwrap();
+}
+
+fn no_skill_groups(catalog: &Path) {
+    fs::write(catalog.join("skill-groups.toml"), "").unwrap();
+}
+
 fn make_catalog(base: &Path, dirname: &str, skill: &str, body: &str) -> std::path::PathBuf {
     let catalog = base.join(dirname);
     fs::create_dir_all(catalog.join("skills").join(skill)).unwrap();
     fs::write(catalog.join("skills").join(skill).join("SKILL.md"), body).unwrap();
-    fs::write(catalog.join("external-skills.toml"), "").unwrap();
-    fs::write(catalog.join("skill-groups.toml"), "").unwrap();
+    no_external_skills(&catalog);
+    no_skill_groups(&catalog);
     commit_repo(&catalog);
     catalog
 }
@@ -69,12 +141,18 @@ impl Fixture {
         fs::write(catalog.join("skills/alpha/deep/file.txt"), "deep").unwrap();
         fs::create_dir_all(catalog.join("skills/beta")).unwrap();
         fs::write(catalog.join("skills/beta/SKILL.md"), "beta v1").unwrap();
-        fs::write(catalog.join("external-skills.toml"), format!("[skills.\"ext\"]\nsource = \"{}\"\nsubdirectory = \"nested/ext-skill\"\nref = \"master\"\n", external.display())).unwrap();
-        fs::write(
-            catalog.join("skill-groups.toml"),
-            "[groups.\"web\"]\nskills = \"alpha ext\"\n",
-        )
-        .unwrap();
+        write_external_skills(
+            &catalog,
+            vec![(
+                "ext",
+                TestExternalSkill {
+                    source: external.display().to_string(),
+                    subdirectory: Some("nested/ext-skill".into()),
+                    reference: Some("master".into()),
+                },
+            )],
+        );
+        write_skill_groups(&catalog, vec![("web", "alpha ext")]);
         commit_repo(&catalog);
         Self { tmp, catalog }
     }
@@ -290,14 +368,17 @@ fn typo_suggestions_and_validation() {
 #[test]
 fn force_install_failure_preserves_existing_skill() {
     let f = Fixture::new();
-    fs::write(
-        f.catalog.join("external-skills.toml"),
-        format!(
-            "[skills.\"bad\"]\nsource = \"{}\"\nsubdirectory = \"does-not-exist\"\nref = \"master\"\n",
-            f.catalog.display()
-        ),
-    )
-    .unwrap();
+    write_external_skills(
+        &f.catalog,
+        vec![(
+            "bad",
+            TestExternalSkill {
+                source: f.catalog.display().to_string(),
+                subdirectory: Some("does-not-exist".into()),
+                reference: Some("master".into()),
+            },
+        )],
+    );
     git(&f.catalog, &["add", "."]);
     git(
         &f.catalog,
@@ -406,7 +487,7 @@ fn direct_git_install_and_bulk_update_uses_provenance() {
     fs::write(repo.join("SKILL.md"), "d1").unwrap();
     commit_repo(&repo);
     let root = f.tmp.path().join("skills");
-    let repo_url = format!("file://{}", repo.display());
+    let repo_url = file_url(&repo);
     f.cmd()
         .args(["install", "--yes"])
         .arg(&repo_url)
@@ -571,12 +652,18 @@ fn direct_markdown_catalog_http_success_and_error() {
     let ok_url = spawn_http(200, "markdown skill");
     let catalog = tmp.path().join("catalog");
     fs::create_dir_all(&catalog).unwrap();
-    fs::write(
-        catalog.join("external-skills.toml"),
-        format!("[skills.\"md\"]\nsource = \"{ok_url}\"\n"),
-    )
-    .unwrap();
-    fs::write(catalog.join("skill-groups.toml"), "").unwrap();
+    write_external_skills(
+        &catalog,
+        vec![(
+            "md",
+            TestExternalSkill {
+                source: ok_url,
+                subdirectory: None,
+                reference: None,
+            },
+        )],
+    );
+    no_skill_groups(&catalog);
     commit_repo(&catalog);
     let root = tmp.path().join("skills");
     bin()
@@ -592,11 +679,17 @@ fn direct_markdown_catalog_http_success_and_error() {
     );
 
     let err_url = spawn_http(500, "nope");
-    fs::write(
-        catalog.join("external-skills.toml"),
-        format!("[skills.\"md\"]\nsource = \"{err_url}\"\n"),
-    )
-    .unwrap();
+    write_external_skills(
+        &catalog,
+        vec![(
+            "md",
+            TestExternalSkill {
+                source: err_url,
+                subdirectory: None,
+                reference: None,
+            },
+        )],
+    );
     git_commit_all(&catalog, "error-url");
     bin()
         .env("SKILLDECK_CATALOG_REPOSITORY", &catalog)
@@ -641,7 +734,7 @@ fn malformed_catalogs_corrupt_manifest_and_unsafe_paths_are_safe() {
 
     let bad_group = tmp.path().join("bad-group");
     fs::create_dir_all(&bad_group).unwrap();
-    fs::write(bad_group.join("external-skills.toml"), "").unwrap();
+    no_external_skills(&bad_group);
     fs::write(
         bad_group.join("skill-groups.toml"),
         "[groups.\"x\"\nskills = ",
@@ -661,19 +754,25 @@ fn malformed_catalogs_corrupt_manifest_and_unsafe_paths_are_safe() {
     fs::write(root.join(".skilldeck/installations.toml"), "not = [toml").unwrap();
     bin().arg("update").arg(&root).assert().failure();
 
-    for subdir in ["../outside", "/tmp/outside"] {
+    let unsafe_subdirs = vec![
+        "../outside".to_string(),
+        tmp.path().join("absolute-outside").display().to_string(),
+    ];
+    for subdir in unsafe_subdirs {
         let cat = tmp.path().join(format!("unsafe-{}", subdir.len()));
         fs::create_dir_all(&cat).unwrap();
-        fs::write(
-            cat.join("external-skills.toml"),
-            format!(
-                "[skills.\"u\"]\nsource = \"{}\"\nsubdirectory = \"{}\"\n",
-                cat.display(),
-                subdir
-            ),
-        )
-        .unwrap();
-        fs::write(cat.join("skill-groups.toml"), "").unwrap();
+        write_external_skills(
+            &cat,
+            vec![(
+                "u",
+                TestExternalSkill {
+                    source: cat.display().to_string(),
+                    subdirectory: Some(subdir.clone()),
+                    reference: None,
+                },
+            )],
+        );
+        no_skill_groups(&cat);
         commit_repo(&cat);
         bin()
             .env("SKILLDECK_CATALOG_REPOSITORY", &cat)
@@ -712,8 +811,44 @@ fn git_ref_tracking_and_pinning_semantics() {
 
     let catalog = tmp.path().join("catalog");
     fs::create_dir_all(&catalog).unwrap();
-    fs::write(catalog.join("external-skills.toml"), format!("[skills.\"default\"]\nsource = \"{}\"\n\n[skills.\"dash\"]\nsource = \"{}\"\nref = \"-\"\n\n[skills.\"pinned\"]\nsource = \"{}\"\nref = \"{}\"\n\n[skills.\"branch\"]\nsource = \"{}\"\nref = \"feature\"\n", repo.display(), repo.display(), repo.display(), pinned, repo.display())).unwrap();
-    fs::write(catalog.join("skill-groups.toml"), "").unwrap();
+    write_external_skills(
+        &catalog,
+        vec![
+            (
+                "default",
+                TestExternalSkill {
+                    source: repo.display().to_string(),
+                    subdirectory: None,
+                    reference: None,
+                },
+            ),
+            (
+                "dash",
+                TestExternalSkill {
+                    source: repo.display().to_string(),
+                    subdirectory: None,
+                    reference: Some("-".into()),
+                },
+            ),
+            (
+                "pinned",
+                TestExternalSkill {
+                    source: repo.display().to_string(),
+                    subdirectory: None,
+                    reference: Some(pinned),
+                },
+            ),
+            (
+                "branch",
+                TestExternalSkill {
+                    source: repo.display().to_string(),
+                    subdirectory: None,
+                    reference: Some("feature".into()),
+                },
+            ),
+        ],
+    );
+    no_skill_groups(&catalog);
     commit_repo(&catalog);
     let root = tmp.path().join("skills");
     for skill in ["default", "dash", "pinned", "branch"] {
@@ -758,7 +893,7 @@ fn single_updates_missing_refs_failed_clones_and_force_unsafe_destinations() {
     fs::write(repo.join("SKILL.md"), "d1").unwrap();
     commit_repo(&repo);
     let root = tmp.path().join("skills");
-    let url = format!("file://{}", repo.display());
+    let url = file_url(&repo);
     bin()
         .args(["install", "--yes"])
         .arg(&url)
@@ -796,21 +931,25 @@ fn single_updates_missing_refs_failed_clones_and_force_unsafe_destinations() {
     );
 
     bin()
-        .args(["install", "--yes", "file:///definitely/missing/repo"])
+        .args(["install", "--yes"])
+        .arg(file_url(&tmp.path().join("definitely-missing-repo")))
         .arg(tmp.path().join("badroot"))
         .assert()
         .failure();
     let badref = tmp.path().join("badref");
     fs::create_dir_all(&badref).unwrap();
-    fs::write(
-        badref.join("external-skills.toml"),
-        format!(
-            "[skills.\"x\"]\nsource = \"{}\"\nref = \"missing-ref\"\n",
-            repo.display()
-        ),
-    )
-    .unwrap();
-    fs::write(badref.join("skill-groups.toml"), "").unwrap();
+    write_external_skills(
+        &badref,
+        vec![(
+            "x",
+            TestExternalSkill {
+                source: repo.display().to_string(),
+                subdirectory: None,
+                reference: Some("missing-ref".into()),
+            },
+        )],
+    );
+    no_skill_groups(&badref);
     commit_repo(&badref);
     bin()
         .env("SKILLDECK_CATALOG_REPOSITORY", &badref)
@@ -877,19 +1016,18 @@ fn install_group_source_failure_happens_before_destructive_overwrite() {
     let catalog = tmp.path().join("catalog");
     fs::create_dir_all(catalog.join("skills/alpha")).unwrap();
     fs::write(catalog.join("skills/alpha/SKILL.md"), "new alpha").unwrap();
-    fs::write(
-        catalog.join("external-skills.toml"),
-        format!(
-            "[skills.\"bad\"]\nsource = \"{}\"\nref = \"missing-ref\"\n",
-            source.display()
-        ),
-    )
-    .unwrap();
-    fs::write(
-        catalog.join("skill-groups.toml"),
-        "[groups.\"g\"]\nskills = \"alpha bad\"\n",
-    )
-    .unwrap();
+    write_external_skills(
+        &catalog,
+        vec![(
+            "bad",
+            TestExternalSkill {
+                source: source.display().to_string(),
+                subdirectory: None,
+                reference: Some("missing-ref".into()),
+            },
+        )],
+    );
+    write_skill_groups(&catalog, vec![("g", "alpha bad")]);
     commit_repo(&catalog);
     let root = tmp.path().join("skills");
     fs::create_dir_all(root.join("alpha")).unwrap();
