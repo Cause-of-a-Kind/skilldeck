@@ -6,17 +6,17 @@ Skilldeck is catalog-agnostic: catalogs can live in public or private Git reposi
 
 ## Install
 
-Install the latest published v0.1.3 GitHub Release on Linux/macOS:
+Install the latest published v0.1.4 GitHub Release on Linux/macOS:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.3/skilldeck-installer.sh | sh
+  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.4/skilldeck-installer.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.3/skilldeck-installer.ps1 | iex
+irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.4/skilldeck-installer.ps1 | iex
 ```
 
 Security note: piping installers directly to a shell is convenient but optional. You can download the installer or archive first, inspect it, verify the `.sha256` file or `sha256.sum`, and run it locally.
@@ -175,6 +175,8 @@ Remember: `skilldeck update` refreshes installed skills; `skilldeck upgrade` upd
 
 Skilldeck writes `<install-root>/.skilldeck/installations.toml` recording managed installs as `catalog` or `direct-git` sources. Bulk update uses this provenance instead of guessing from the current global config.
 
+Commit `.skilldeck/installations.toml` alongside a project’s installed skills. It acts as the project’s Skilldeck provenance manifest, allowing other contributors and CI to update from the same recorded sources without relying on their global catalog configuration. The manifest contains repository strings and refs but no stored credentials; never embed credentials in repository URLs. For stronger reproducibility, prefer immutable commit refs or release tags over moving branches such as `main`.
+
 ## Upgrading Skilldeck
 
 `skilldeck upgrade` checks the latest stable GitHub Release for `Cause-of-a-Kind/skilldeck`, ignores drafts/prereleases, chooses the cargo-dist archive for the current supported target, downloads the archive plus checksum, verifies it, extracts the expected `skilldeck`/`skilldeck.exe` binary, and replaces the current executable without running installer scripts.
@@ -197,6 +199,6 @@ dist generate --mode ci --check --allow-dirty
 dist plan --tag v0.1.4 --allow-dirty
 ```
 
-GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.1.3` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
+GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.1.4` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
 
 crates.io publishing remains disabled while the CLI surface stabilizes.
