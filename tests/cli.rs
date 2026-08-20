@@ -1613,7 +1613,7 @@ fn upgrade_check_current_and_available_exit_success_without_download() {
     let asset = "skilldeck-test.zip";
     let server = TestServer::new(vec![(
         "/releases",
-        release_json("http://placeholder", "v0.1.2", false, false, asset).into_bytes(),
+        release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
         "application/json",
     )]);
     bin()
@@ -1628,7 +1628,7 @@ fn upgrade_check_current_and_available_exit_success_without_download() {
 
     let server = TestServer::new(vec![(
         "/releases",
-        release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+        release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
         "application/json",
     )]);
     bin()
@@ -1661,7 +1661,7 @@ fn upgrade_actual_current_exe_self_replace_path_keeps_copied_binary_runnable() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.3", false, false, &asset).into_bytes(),
+            release_json("http://placeholder", "v0.1.4", false, false, &asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1709,7 +1709,7 @@ fn upgrade_no_eof_preserves_target_and_yes_replaces_after_checksum() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive.clone(), "application/octet-stream"),
@@ -1761,7 +1761,7 @@ fn upgrade_readonly_target_fails_with_package_manager_caveat() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1798,7 +1798,7 @@ fn upgrade_checksum_mismatch_and_http_failures_preserve_target() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1830,4 +1830,212 @@ fn upgrade_checksum_mismatch_and_http_failures_preserve_target() {
         .failure()
         .stderr(predicate::str::contains("no stable"));
     assert_eq!(fs::read(&target).unwrap(), b"old");
+}
+
+#[test]
+fn bootstrap_quickstart_explicit_creates_expected_catalog_without_config() {
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("my catalog");
+    let cfg = tmp.path().join("cfg");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["bootstrap", dest.to_str().unwrap(), "--quickstart"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created Skilldeck catalog"))
+        .stdout(predicate::str::contains("Next steps:"))
+        .stdout(predicate::str::contains("Review the generated files"))
+        .stdout(predicate::str::contains("From inside that directory"))
+        .stdout(predicate::str::contains("git init --initial-branch=main"))
+        .stdout(predicate::str::contains(
+            "skilldeck init --repository <your-catalog-git-url> --reference main",
+        ))
+        .stdout(predicate::str::contains("skilldeck doctor"))
+        .stdout(predicate::str::contains(
+            "skilldeck install-group quickstart <install-directory>",
+        ))
+        .stdout(predicate::str::contains("cd ").not());
+
+    assert!(!cfg.exists(), "bootstrap must not mutate global config");
+    let readme = fs::read_to_string(dest.join("README.md")).unwrap();
+    assert!(readme.contains("git init --initial-branch=main"));
+    assert!(dest.join("README.md").is_file());
+    let skill = fs::read_to_string(dest.join("skills/hello-world/SKILL.md")).unwrap();
+    assert!(skill.contains("name: hello-world"));
+    assert!(skill.contains("description:"));
+    let external = fs::read_to_string(dest.join("external-skills.toml")).unwrap();
+    assert!(external.contains("https://github.com/Cause-of-a-Kind/skilldeck.git"));
+    assert!(external.contains("subdirectory = \"examples/skilldeck-skill\""));
+    assert!(external.contains("ref = \"v0.1.3\""));
+    assert_eq!(
+        fs::read_to_string(dest.join("skill-groups.toml")).unwrap(),
+        "[groups.quickstart]\nskills = \"hello-world skilldeck\"\n"
+    );
+
+    commit_repo(&dest);
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", tmp.path().join("cfg2"))
+        .env("SKILLDECK_NO_UPDATE_CHECK", "1")
+        .args([
+            "doctor",
+            "--catalog-repository",
+            dest.to_str().unwrap(),
+            "--catalog-ref",
+            "master",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Found 2 skills and 1 groups"));
+}
+
+#[test]
+fn bootstrap_empty_explicit_accepts_existing_empty_directory() {
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("empty-dest");
+    fs::create_dir(&dest).unwrap();
+    bin()
+        .args(["bootstrap", dest.to_str().unwrap(), "--empty"])
+        .assert()
+        .success();
+    assert!(dest.join("skills/.gitkeep").is_file());
+    assert!(fs::read_to_string(dest.join("external-skills.toml"))
+        .unwrap()
+        .contains("[skills.example]"));
+    assert!(fs::read_to_string(dest.join("skill-groups.toml"))
+        .unwrap()
+        .contains("[groups.default]"));
+    toml::from_str::<toml::Value>(&fs::read_to_string(dest.join("external-skills.toml")).unwrap())
+        .unwrap();
+    toml::from_str::<toml::Value>(&fs::read_to_string(dest.join("skill-groups.toml")).unwrap())
+        .unwrap();
+}
+
+#[test]
+fn bootstrap_refuses_non_empty_without_mutation() {
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("catalog");
+    fs::create_dir(&dest).unwrap();
+    fs::write(dest.join("keep.txt"), "keep").unwrap();
+    bin()
+        .args(["bootstrap", dest.to_str().unwrap(), "--quickstart"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not empty"));
+    assert_eq!(fs::read_to_string(dest.join("keep.txt")).unwrap(), "keep");
+    assert!(!dest.join("README.md").exists());
+}
+
+#[test]
+fn bootstrap_noninteractive_missing_inputs_and_conflicts_fail() {
+    bin()
+        .arg("bootstrap")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "non-interactive bootstrap requires",
+        ));
+    let tmp = TempDir::new().unwrap();
+    bin()
+        .args(["bootstrap", tmp.path().join("x").to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "non-interactive bootstrap requires",
+        ));
+    bin()
+        .args([
+            "bootstrap",
+            tmp.path().join("x").to_str().unwrap(),
+            "--quickstart",
+            "--empty",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
+}
+
+#[test]
+fn bootstrap_interactive_defaults_and_empty_choice_work_with_stdin() {
+    let tmp = TempDir::new().unwrap();
+    let mut cmd = bin();
+    cmd.current_dir(tmp.path())
+        .arg("bootstrap")
+        .write_stdin("\nnope\n2\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "Where should the catalog be created? [./skilldeck-catalog]",
+        ))
+        .stderr(predicate::str::contains("Quickstart"))
+        .stderr(predicate::str::contains(
+            "Unknown bootstrap template `nope`",
+        ));
+    assert!(tmp
+        .path()
+        .join("skilldeck-catalog/skills/.gitkeep")
+        .is_file());
+
+    let dest = tmp.path().join("chosen empty");
+    bin()
+        .arg("bootstrap")
+        .write_stdin(format!("{}\nempty\n", dest.display()))
+        .assert()
+        .success();
+    assert!(dest.join("skills/.gitkeep").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn bootstrap_refuses_symlink_destination() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let real = tmp.path().join("real");
+    let link = tmp.path().join("link");
+    fs::create_dir(&real).unwrap();
+    symlink(&real, &link).unwrap();
+    bin()
+        .args(["bootstrap", link.to_str().unwrap(), "--empty"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("symlink"));
+    assert!(fs::read_dir(&real).unwrap().next().is_none());
+}
+
+#[test]
+fn public_skilldeck_example_skill_exists_and_mentions_safe_commands() {
+    let body = fs::read_to_string("examples/skilldeck-skill/SKILL.md").unwrap();
+    assert!(body.contains("description:"));
+    for needle in [
+        "skilldeck list",
+        "skilldeck install",
+        "skilldeck install-group",
+        "skilldeck update",
+        "skilldeck doctor",
+        "skilldeck remove",
+        "skilldeck upgrade",
+        "Update vs upgrade",
+        "--force",
+        "git init --initial-branch=main",
+    ] {
+        assert!(body.contains(needle), "missing {needle}");
+    }
+}
+
+#[test]
+fn bootstrap_creates_nested_paths_with_spaces() {
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("nested parent/catalog with spaces");
+    bin()
+        .args(["bootstrap", dest.to_str().unwrap(), "--quickstart"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(dest.display().to_string()))
+        .stdout(predicate::str::contains("cd ").not());
+    assert!(dest.join("skills/hello-world/SKILL.md").is_file());
+    let parent = tmp.path().join("nested parent");
+    assert!(fs::read_dir(parent).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".skilldeck-bootstrap-")));
 }

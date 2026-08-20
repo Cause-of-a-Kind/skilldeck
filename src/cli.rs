@@ -16,6 +16,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Create a new local Skilldeck catalog scaffold.
+    Bootstrap(BootstrapArgs),
     /// Configure the global per-user catalog repository.
     Init(InitArgs),
     /// Install a catalog skill or direct Git repository.
@@ -46,6 +48,18 @@ pub struct CatalogOverrideArgs {
     /// Catalog Git ref/branch/tag (overrides config; env SKILLDECK_CATALOG_REF).
     #[arg(long, global = true, env = "SKILLDECK_CATALOG_REF")]
     pub catalog_ref: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct BootstrapArgs {
+    /// Destination directory to create or populate if genuinely empty.
+    pub path: Option<PathBuf>,
+    /// Create a catalog with working example skills and a quickstart group.
+    #[arg(long, conflicts_with = "empty")]
+    pub quickstart: bool,
+    /// Create only the catalog structure and commented example formats.
+    #[arg(long, conflicts_with = "quickstart")]
+    pub empty: bool,
 }
 
 #[derive(Args, Debug)]

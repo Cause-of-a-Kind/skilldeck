@@ -22,6 +22,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let should_notify = should_notify_after(&cli.command);
     let result = match cli.command {
+        Commands::Bootstrap(args) => ops::bootstrap(args),
         Commands::Init(args) => ops::init(args),
         Commands::Install(args) => ops::install(args, false),
         Commands::InstallGroup(args) => ops::install_group(args),

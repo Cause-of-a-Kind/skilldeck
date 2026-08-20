@@ -1,12 +1,14 @@
 # Skilldeck
 
-Skilldeck is a public, open-source CLI for installing agent skills from Git-backed catalogs. It is catalog-agnostic: configure any public or private Git repository that follows the supported format, and let your system `git` handle SSH/HTTPS authentication. Skilldeck never stores credentials.
+Skilldeck installs agent skills from Git-backed catalogs. Point it at a catalog you trust, list what is available, install one skill or a group, and later update those installed skills from their recorded provenance.
+
+Skilldeck is catalog-agnostic: catalogs can live in public or private Git repositories, and your system `git` handles SSH/HTTPS authentication. Skilldeck does not store credentials or make global config changes except when you explicitly run `skilldeck init`.
 
 ## Install
 
-Install the latest v0.1.2 GitHub Release on Linux/macOS with the generated shell installer:
+Install the latest published v0.1.2 GitHub Release on Linux/macOS:
 
-```bash
+```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.2/skilldeck-installer.sh | sh
 ```
@@ -17,41 +19,76 @@ On Windows PowerShell:
 irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.2/skilldeck-installer.ps1 | iex
 ```
 
-Security note: piping installers directly to a shell is convenient but optional. If you prefer, download the installer or release archive first, inspect it, verify the `.sha256` file or `sha256.sum`, and then run it locally.
+Security note: piping installers directly to a shell is convenient but optional. You can download the installer or archive first, inspect it, verify the `.sha256` file or `sha256.sum`, and run it locally.
 
 Source fallback:
 
-```bash
+```sh
 git clone https://github.com/Cause-of-a-Kind/skilldeck.git
 cd skilldeck
 cargo install --path .
 ```
 
-Future npm distribution may wrap official binaries, but will not use unsafe postinstall scripts.
+Skilldeck is not published to npm or crates.io yet.
 
-## Configure a catalog
+## Quickstart with an existing catalog
 
-```bash
+```sh
 skilldeck init --repository git@github.com:your-org/agent-skills.git --reference main --yes
+skilldeck doctor
+skilldeck list
+skilldeck install-group default ./skills
 ```
 
-If config already exists, `init` asks before replacing it. In non-interactive use, pass `--force` to replace existing config explicitly.
+Catalog selection precedence is:
 
-Config is global per user in the platform config directory (`directories` crate). Override location for tests/automation with `SKILLDECK_CONFIG_DIR`.
-
-Precedence for catalog selection:
-
-1. CLI options on catalog commands: `--catalog-repository`, `--catalog-ref`
+1. CLI options: `--catalog-repository`, `--catalog-ref`
 2. Environment: `SKILLDECK_CATALOG_REPOSITORY`, `SKILLDECK_CATALOG_REF`
-3. Global config from `skilldeck init`
+3. Global per-user config written by `skilldeck init`
+
+If config already exists, `init` asks before replacing it. In scripts, pass `--force` to replace existing config explicitly. Set `SKILLDECK_CONFIG_DIR` to isolate config for tests or automation.
+
+## Create your own catalog
+
+Generate a starter catalog:
+
+```sh
+skilldeck bootstrap ./skilldeck-catalog --quickstart
+```
+
+Or create only the structure:
+
+```sh
+skilldeck bootstrap ./skilldeck-catalog --empty
+```
+
+Without arguments in an interactive terminal, `bootstrap` asks where to create the catalog and whether to use the quickstart or empty template. In non-interactive use, provide both a path and exactly one template flag.
+
+`bootstrap` creates a missing destination or uses an existing genuinely empty directory. It refuses symlinks, non-empty destinations, and never overwrites; there is no `--force`.
+
+Typical next steps:
+
+```sh
+cd skilldeck-catalog
+git init --initial-branch=main
+git add .
+git commit -m "Start Skilldeck catalog"
+git remote add origin <your-catalog-url>
+git push -u origin main
+skilldeck init --repository <your-catalog-url> --reference main
+skilldeck doctor
+skilldeck install-group quickstart ../skills
+```
 
 ## Catalog format
 
-Skilldeck supports the existing registry layout exactly:
+A catalog repository may contain:
 
-- first-party skill directories as immediate children of `skills/<name>/`, each containing `SKILL.md`
+- first-party skill directories at `skills/<name>/SKILL.md`
 - `external-skills.toml`
 - `skill-groups.toml`
+
+First-party skill names are directory names. Names must contain only ASCII letters, numbers, dots, underscores, and hyphens.
 
 External skill example:
 
@@ -62,7 +99,7 @@ subdirectory = "layered-rails/skills/layered-rails"
 ref = "f4e8cd90ae388339d53bc05a3826034d0df56255"
 ```
 
-`source` may be a Git URL or a direct Markdown URL. `subdirectory` and `ref` are optional; use `-` for repository root/default ref.
+`source` may be a Git URL or a direct Markdown URL. `subdirectory` and `ref` are optional. Subdirectories are validated as safe relative paths.
 
 Group example:
 
@@ -71,78 +108,79 @@ Group example:
 skills = "layered-rails object-oriented-design rails-feature-review rails-project-review"
 ```
 
-Names must contain only letters, numbers, dots, underscores, and hyphens. Paths are validated against traversal.
+Groups install or remove a whitespace-separated list of catalog skill names.
 
-## Usage
+## Practical command reference
 
-```bash
-skilldeck install fin ./skills
-skilldeck install --force fin ./skills
-skilldeck install --yes fin ./new-skills
-skilldeck install-group rails ./skills
-skilldeck update fin ./skills
-skilldeck update ./skills
-skilldeck upgrade --check
-skilldeck upgrade
-skilldeck upgrade --yes
-skilldeck remove fin ./skills
-skilldeck remove-group rails ./skills
+```sh
+skilldeck bootstrap ./catalog --quickstart
+skilldeck init --repository <catalog-url-or-path> --reference main
 skilldeck list
 skilldeck list --json
 skilldeck doctor
 skilldeck doctor --deep
-skilldeck help
+
+skilldeck install fin ./skills
+skilldeck install --yes fin ./new-skills
+skilldeck install --force fin ./skills
+skilldeck install-group rails ./skills
+
+skilldeck update fin ./skills
+skilldeck update ./skills
+skilldeck remove fin ./skills
+skilldeck remove-group rails ./skills
+
+skilldeck upgrade --check
+skilldeck upgrade
+skilldeck upgrade --yes
 skilldeck version
+skilldeck help
 ```
 
 Direct Git installs are supported:
 
-```bash
+```sh
 skilldeck install https://github.com/example/my-skill.git ./skills
 ```
 
 The repository basename becomes the skill directory name. Direct Markdown URLs are supported only through catalog entries, where the catalog name supplies the destination directory.
 
-## Safeguards
+Remember: `skilldeck update` refreshes installed skills; `skilldeck upgrade` updates the Skilldeck binary.
 
-- Existing destinations are not overwritten unless `--force` is passed.
-- Missing install roots prompt `Create it? [y/N]`; default is No. Use `--yes` in scripts/CI.
+## Safeguards, security, and provenance
+
+- Existing skill destinations are not overwritten unless `--force` is passed.
+- Missing install roots prompt `Create it? [y/N]`; default is No. Use `--yes` only in scripts/CI where the path is intentional.
 - Installed `.git` directories/files are stripped.
 - `remove` refuses to delete directories without `SKILL.md`.
 - Bulk update and group removal list updated/removed/skipped entries and summaries.
 - Unrelated directories are left untouched.
+- Skilldeck never stores Git credentials. Do not put secrets in repository URLs.
+
+Skilldeck writes `<install-root>/.skilldeck/installations.toml` recording managed installs as `catalog` or `direct-git` sources. Bulk update uses this provenance instead of guessing from the current global config.
 
 ## Upgrading Skilldeck
 
-`skilldeck upgrade` updates the Skilldeck binary itself; `skilldeck update` remains for installed skills. It checks the latest stable GitHub Release for `Cause-of-a-Kind/skilldeck`, ignores drafts/prereleases, chooses the cargo-dist archive for the current supported target, downloads the archive plus SHA-256 sidecar or `sha256.sum`, verifies the checksum, extracts the expected `skilldeck`/`skilldeck.exe` binary, and replaces the current executable without running installer scripts.
+`skilldeck upgrade` checks the latest stable GitHub Release for `Cause-of-a-Kind/skilldeck`, ignores drafts/prereleases, chooses the cargo-dist archive for the current supported target, downloads the archive plus checksum, verifies it, extracts the expected `skilldeck`/`skilldeck.exe` binary, and replaces the current executable without running installer scripts.
 
 Supported self-upgrade archives are Linux x86_64/aarch64, macOS x86_64/aarch64, and Windows x86_64 MSVC. If the executable or its directory is not writable, Skilldeck fails with a package-manager caveat instead of escalating privileges.
 
-`skilldeck upgrade --check` only reports status, never prompts or installs, and exits 0 when the check succeeds whether or not an update is available. `--yes` installs without prompting.
+`skilldeck upgrade --check` reports status and never installs. Passive update notices are shown only on interactive stderr, never for JSON output, scripts/tests, `upgrade`, or when `SKILLDECK_NO_UPDATE_CHECK=1`. Checks are cached with offline-friendly backoff. No telemetry is sent.
 
-For normal interactive commands, Skilldeck may print a passive stderr notice when a newer stable release is known. Notices are shown only when stderr is a terminal, never for JSON output, scripts/tests, `upgrade`, or when `SKILLDECK_NO_UPDATE_CHECK=1`. Successful checks are cached for 24 hours in the platform cache directory; failed attempts are cached for a one-hour backoff so offline use does not repeatedly wait on timeouts. Stale checks use a short timeout and failures are silent. No telemetry is sent.
+## Development and release
 
-## Provenance manifest
+Useful local checks:
 
-Skilldeck writes an unobtrusive manifest at `<install-root>/.skilldeck/installations.toml`. It records each Skilldeck-managed directory as either:
-
-- `catalog`: original catalog name, catalog repository, and catalog ref
-- `direct-git`: original repository and optional ref
-
-This lets bulk update preserve the original source/catalog instead of guessing from the current global config. The manifest contains no credentials beyond the repository strings you supplied. Do not put secrets in repository URLs.
-
-## Test coverage
-
-Behavioral coverage is enforced with unit/integration tests and measured with [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov):
-
-```bash
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets --all-features
 cargo llvm-cov --workspace --all-targets --all-features --summary-only --fail-under-lines 85
+git diff --check
+cargo dist generate
+cargo dist plan
 ```
 
-The current measured coverage on Linux is 86.23% line coverage, 80.00% function coverage, and 83.21% region coverage. Branch coverage is not reported by the current Rust/LLVM setup for this crate. CI enforces the line threshold while prioritizing meaningful release-risk behavior over artificial assertions.
+GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.1.2` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
 
-## Release approach
-
-GitHub Releases are configured with cargo-dist 0.32.0. Pushing a version tag such as `v0.1.2` runs the release workflow, builds archives for the supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
-
-crates.io publishing remains disabled for the initial release while the CLI surface stabilizes.
+crates.io publishing remains disabled while the CLI surface stabilizes.

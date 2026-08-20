@@ -103,6 +103,291 @@ fn confirm(label: &str) -> Result<bool> {
     Ok(matches!(s.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BootstrapTemplate {
+    Quickstart,
+    Empty,
+}
+
+pub fn bootstrap(args: BootstrapArgs) -> Result<()> {
+    let explicit_template = match (args.quickstart, args.empty) {
+        (true, false) => Some(BootstrapTemplate::Quickstart),
+        (false, true) => Some(BootstrapTemplate::Empty),
+        (false, false) => None,
+        (true, true) => unreachable!("clap rejects conflicting template flags"),
+    };
+
+    let path = match args.path {
+        Some(path) => path,
+        None => PathBuf::from(prompt_default_non_eof(
+            "Where should the catalog be created?",
+            "./skilldeck-catalog",
+        )?),
+    };
+    let template = match explicit_template {
+        Some(template) => template,
+        None => prompt_bootstrap_template()?,
+    };
+
+    create_bootstrap_catalog(&path, template)?;
+    print_bootstrap_success(&path, template);
+    Ok(())
+}
+
+fn print_bootstrap_success(path: &Path, template: BootstrapTemplate) {
+    println!("Created Skilldeck catalog at {}", path.display());
+    println!("Next steps:");
+    println!("  1. Review the generated files in {}", path.display());
+    println!("  2. From inside that directory, initialize and publish the catalog with Git:");
+    println!("     git init --initial-branch=main");
+    println!("     git add .");
+    println!("     git commit -m \"Start Skilldeck catalog\"");
+    println!("     git remote add origin <your-catalog-git-url>");
+    println!("     git push -u origin main");
+    println!("  3. Configure Skilldeck:");
+    println!("     skilldeck init --repository <your-catalog-git-url> --reference main");
+    println!("  4. Validate the catalog:");
+    println!("     skilldeck doctor");
+    if template == BootstrapTemplate::Quickstart {
+        println!("  5. Try the quickstart group:");
+        println!("     skilldeck install-group quickstart <install-directory>");
+    }
+}
+
+fn prompt_bootstrap_template() -> Result<BootstrapTemplate> {
+    loop {
+        eprintln!("Choose a catalog template:");
+        eprintln!("  1. Quickstart — working examples (recommended)");
+        eprintln!("  2. Empty — catalog structure only");
+        eprint!("Template [1]: ");
+        io::stderr().flush().ok();
+        let mut s = String::new();
+        if io::stdin().read_line(&mut s)? == 0 {
+            return Err(anyhow!(
+                "non-interactive bootstrap requires a destination path and exactly one template flag (--quickstart or --empty)"
+            ));
+        }
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "1" | "q" | "quickstart" | "quick" => return Ok(BootstrapTemplate::Quickstart),
+            "2" | "e" | "empty" => return Ok(BootstrapTemplate::Empty),
+            other => {
+                eprintln!("Unknown bootstrap template `{other}`. Use 1/quickstart or 2/empty.")
+            }
+        }
+    }
+}
+
+fn prompt_default_non_eof(label: &str, default: &str) -> Result<String> {
+    eprint!("{label} [{default}]: ");
+    io::stderr().flush().ok();
+    let mut s = String::new();
+    if io::stdin().read_line(&mut s)? == 0 {
+        return Err(anyhow!(
+            "non-interactive bootstrap requires a destination path and exactly one template flag (--quickstart or --empty)"
+        ));
+    }
+    let s = s.trim();
+    Ok(if s.is_empty() {
+        default.into()
+    } else {
+        s.into()
+    })
+}
+
+fn create_bootstrap_catalog(path: &Path, template: BootstrapTemplate) -> Result<()> {
+    ensure_bootstrap_destination(path)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating parent directory {}", parent.display()))?;
+    let temp = tempfile::Builder::new()
+        .prefix(".skilldeck-bootstrap-")
+        .tempdir_in(parent)
+        .with_context(|| format!("creating temporary catalog in {}", parent.display()))?;
+    write_bootstrap_template(temp.path(), template)?;
+
+    if path.exists() {
+        move_dir_contents(temp.path(), path)?;
+    } else {
+        fs::rename(temp.path(), path)
+            .with_context(|| format!("creating catalog directory {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn ensure_bootstrap_destination(path: &Path) -> Result<()> {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(anyhow!(
+                "refusing to bootstrap into symlink {}",
+                path.display()
+            ));
+        }
+        if !meta.is_dir() {
+            return Err(anyhow!(
+                "bootstrap destination exists and is not a directory: {}",
+                path.display()
+            ));
+        }
+        if fs::read_dir(path)
+            .with_context(|| format!("reading bootstrap destination {}", path.display()))?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            return Err(anyhow!(
+                "bootstrap destination is not empty: {}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn move_dir_contents(from: &Path, to: &Path) -> Result<()> {
+    for entry in fs::read_dir(from).with_context(|| format!("reading {}", from.display()))? {
+        let entry = entry?;
+        fs::rename(entry.path(), to.join(entry.file_name())).with_context(|| {
+            format!(
+                "moving generated catalog entry {} into {}",
+                entry.path().display(),
+                to.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn write_bootstrap_template(root: &Path, template: BootstrapTemplate) -> Result<()> {
+    fs::create_dir_all(root.join("skills"))?;
+    match template {
+        BootstrapTemplate::Quickstart => {
+            fs::create_dir_all(root.join("skills/hello-world"))?;
+            fs::write(root.join("README.md"), QUICKSTART_README)?;
+            fs::write(root.join("skills/hello-world/SKILL.md"), HELLO_WORLD_SKILL)?;
+            fs::write(
+                root.join("external-skills.toml"),
+                QUICKSTART_EXTERNAL_SKILLS,
+            )?;
+            fs::write(root.join("skill-groups.toml"), QUICKSTART_SKILL_GROUPS)?;
+        }
+        BootstrapTemplate::Empty => {
+            fs::write(root.join("README.md"), EMPTY_README)?;
+            fs::write(root.join("skills/.gitkeep"), "")?;
+            fs::write(root.join("external-skills.toml"), EMPTY_EXTERNAL_SKILLS)?;
+            fs::write(root.join("skill-groups.toml"), EMPTY_SKILL_GROUPS)?;
+        }
+    }
+    Ok(())
+}
+
+const QUICKSTART_README: &str = r#"# Skilldeck catalog quickstart
+
+This catalog was generated by `skilldeck bootstrap --quickstart`.
+
+## What's included
+
+- `skills/hello-world/SKILL.md` — a first-party example skill you can edit or replace.
+- `external-skills.toml` — an external `skilldeck` skill pinned to Skilldeck v0.1.3.
+- `skill-groups.toml` — a `quickstart` group containing both skills.
+
+## Try it locally
+
+```sh
+skilldeck init --repository <git-url-for-this-catalog> --reference main
+skilldeck doctor
+skilldeck list
+skilldeck install-group quickstart ./installed-skills
+```
+
+For a local-only test before publishing, initialize Git here and use this directory as the repository path.
+
+```sh
+git init --initial-branch=main
+git add .
+git commit -m "Start Skilldeck catalog"
+skilldeck init --repository . --reference main
+```
+
+## Make it yours
+
+Edit `skills/hello-world/SKILL.md`, add more directories under `skills/`, then update `skill-groups.toml`. Push the catalog to your Git host and point Skilldeck at that URL with `skilldeck init`.
+"#;
+
+const HELLO_WORLD_SKILL: &str = r#"---
+name: hello-world
+description: Use when the user asks for a simple Skilldeck catalog example, wants to verify that installed agent skills are visible, or needs a safe first skill to test installation.
+---
+
+# Hello World Skill
+
+When this skill is available, help the user confirm their Skilldeck setup without changing project files.
+
+## What to do
+
+1. Say that the `hello-world` skill loaded successfully.
+2. Explain where the skill was installed if that context is available.
+3. Suggest a harmless next step, such as running `skilldeck list`, `skilldeck doctor`, or editing this `SKILL.md` in the catalog.
+
+## Safety
+
+Do not commit, push, delete files, or change global configuration unless the user explicitly asks.
+"#;
+
+const QUICKSTART_EXTERNAL_SKILLS: &str = r#"[skills.skilldeck]
+source = "https://github.com/Cause-of-a-Kind/skilldeck.git"
+subdirectory = "examples/skilldeck-skill"
+ref = "v0.1.3"
+"#;
+
+const QUICKSTART_SKILL_GROUPS: &str = r#"[groups.quickstart]
+skills = "hello-world skilldeck"
+"#;
+
+const EMPTY_README: &str = r#"# Skilldeck catalog
+
+A Skilldeck catalog is a Git repository containing first-party skills plus optional external skill and group indexes.
+
+## Add a first-party skill
+
+Create `skills/<name>/SKILL.md`.
+
+## Add external skills
+
+Edit `external-skills.toml`:
+
+```toml
+# [skills.example]
+# source = "https://github.com/example/repo.git"
+# subdirectory = "path/to/skill"
+# ref = "v1.0.0"
+```
+
+## Add groups
+
+Edit `skill-groups.toml`:
+
+```toml
+# [groups.default]
+# skills = "example another-skill"
+```
+
+Publish this directory with Git, then run `skilldeck init --repository <url> --reference <branch-or-tag>` and `skilldeck doctor`.
+"#;
+
+const EMPTY_EXTERNAL_SKILLS: &str = r#"# External skills are optional.
+#
+# [skills.example]
+# source = "https://github.com/example/repo.git"
+# subdirectory = "path/to/skill"
+# ref = "v1.0.0"
+"#;
+
+const EMPTY_SKILL_GROUPS: &str = r#"# Skill groups are optional.
+#
+# [groups.default]
+# skills = "example another-skill"
+"#;
+
 pub fn install(args: InstallArgs, require_existing: bool) -> Result<()> {
     install_named_or_git(
         &args.name_or_git_url,
