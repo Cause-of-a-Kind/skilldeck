@@ -4,17 +4,17 @@ Skilldeck is a public, open-source CLI for installing agent skills from Git-back
 
 ## Install
 
-Install the latest v0.1.1 GitHub Release on Linux/macOS with the generated shell installer:
+Install the latest v0.1.2 GitHub Release on Linux/macOS with the generated shell installer:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.1/skilldeck-installer.sh | sh
+  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.2/skilldeck-installer.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.1/skilldeck-installer.ps1 | iex
+irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.2/skilldeck-installer.ps1 | iex
 ```
 
 Security note: piping installers directly to a shell is convenient but optional. If you prefer, download the installer or release archive first, inspect it, verify the `.sha256` file or `sha256.sum`, and then run it locally.
@@ -49,7 +49,7 @@ Precedence for catalog selection:
 
 Skilldeck supports the existing registry layout exactly:
 
-- first-party recursive skill directories under `skills/<name>/` containing `SKILL.md`
+- first-party skill directories as immediate children of `skills/<name>/`, each containing `SKILL.md`
 - `external-skills.toml`
 - `skill-groups.toml`
 
@@ -82,6 +82,9 @@ skilldeck install --yes fin ./new-skills
 skilldeck install-group rails ./skills
 skilldeck update fin ./skills
 skilldeck update ./skills
+skilldeck upgrade --check
+skilldeck upgrade
+skilldeck upgrade --yes
 skilldeck remove fin ./skills
 skilldeck remove-group rails ./skills
 skilldeck list
@@ -109,6 +112,16 @@ The repository basename becomes the skill directory name. Direct Markdown URLs a
 - Bulk update and group removal list updated/removed/skipped entries and summaries.
 - Unrelated directories are left untouched.
 
+## Upgrading Skilldeck
+
+`skilldeck upgrade` updates the Skilldeck binary itself; `skilldeck update` remains for installed skills. It checks the latest stable GitHub Release for `Cause-of-a-Kind/skilldeck`, ignores drafts/prereleases, chooses the cargo-dist archive for the current supported target, downloads the archive plus SHA-256 sidecar or `sha256.sum`, verifies the checksum, extracts the expected `skilldeck`/`skilldeck.exe` binary, and replaces the current executable without running installer scripts.
+
+Supported self-upgrade archives are Linux x86_64/aarch64, macOS x86_64/aarch64, and Windows x86_64 MSVC. If the executable or its directory is not writable, Skilldeck fails with a package-manager caveat instead of escalating privileges.
+
+`skilldeck upgrade --check` only reports status, never prompts or installs, and exits 0 when the check succeeds whether or not an update is available. `--yes` installs without prompting.
+
+For normal interactive commands, Skilldeck may print a passive stderr notice when a newer stable release is known. Notices are shown only when stderr is a terminal, never for JSON output, scripts/tests, `upgrade`, or when `SKILLDECK_NO_UPDATE_CHECK=1`. Successful checks are cached for 24 hours in the platform cache directory; failed attempts are cached for a one-hour backoff so offline use does not repeatedly wait on timeouts. Stale checks use a short timeout and failures are silent. No telemetry is sent.
+
 ## Provenance manifest
 
 Skilldeck writes an unobtrusive manifest at `<install-root>/.skilldeck/installations.toml`. It records each Skilldeck-managed directory as either:
@@ -126,10 +139,10 @@ Behavioral coverage is enforced with unit/integration tests and measured with [`
 cargo llvm-cov --workspace --all-targets --all-features --summary-only --fail-under-lines 85
 ```
 
-The initial measured coverage on Linux is 86.61% line coverage, 83.74% function coverage, and 83.20% region coverage. Branch coverage is not reported by the current Rust/LLVM setup for this crate. CI enforces the line threshold while prioritizing meaningful release-risk behavior over artificial assertions.
+The current measured coverage on Linux is 86.23% line coverage, 80.00% function coverage, and 83.21% region coverage. Branch coverage is not reported by the current Rust/LLVM setup for this crate. CI enforces the line threshold while prioritizing meaningful release-risk behavior over artificial assertions.
 
 ## Release approach
 
-GitHub Releases are configured with cargo-dist 0.32.0. Pushing a version tag such as `v0.1.1` runs the release workflow, builds archives for the supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
+GitHub Releases are configured with cargo-dist 0.32.0. Pushing a version tag such as `v0.1.2` runs the release workflow, builds archives for the supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
 
 crates.io publishing remains disabled for the initial release while the CLI surface stabilizes.

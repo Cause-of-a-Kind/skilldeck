@@ -24,6 +24,8 @@ pub enum Commands {
     InstallGroup(GroupInstallArgs),
     /// Update one installed skill, or bulk update an install root.
     Update(UpdateArgs),
+    /// Upgrade the Skilldeck binary from the latest stable GitHub release.
+    Upgrade(UpgradeArgs),
     /// Remove one installed skill by directory name.
     Remove(RemoveArgs),
     /// Remove currently installed members of a catalog group.
@@ -98,6 +100,16 @@ pub struct UpdateArgs {
     pub name_or_git_url: Option<String>,
     /// Install root for single updates. For bulk update, pass it as the only positional argument.
     pub install_directory: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct UpgradeArgs {
+    /// Report whether an upgrade is available; never prompt or install. Exits 0 if the check succeeds.
+    #[arg(long)]
+    pub check: bool,
+    /// Download and install without prompting.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args, Debug)]

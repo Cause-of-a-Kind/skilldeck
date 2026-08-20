@@ -1,4 +1,17 @@
-use std::{collections::BTreeMap, fs, path::Path, process::Command};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{Read, Write},
+    net::TcpListener,
+    path::Path,
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
+};
 
 use predicates::prelude::*;
 use serde::Serialize;
@@ -1349,4 +1362,389 @@ fn doctor_structural_and_deep_validation() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("subdirectory"));
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn exe_name() -> &'static str {
+    if cfg!(windows) {
+        "skilldeck.exe"
+    } else {
+        "skilldeck"
+    }
+}
+
+fn zip_with_skilldeck(bytes: &[u8]) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut out);
+        let opts = zip::write::FileOptions::<()>::default();
+        zip.start_file(exe_name(), opts).unwrap();
+        zip.write_all(bytes).unwrap();
+        zip.finish().unwrap();
+    }
+    out.into_inner()
+}
+
+fn platform_archive_with_skilldeck(bytes: &[u8]) -> (String, Vec<u8>) {
+    let asset = if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        "skilldeck-x86_64-unknown-linux-gnu.tar.xz"
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        "skilldeck-aarch64-unknown-linux-gnu.tar.xz"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {
+        "skilldeck-x86_64-apple-darwin.tar.xz"
+    } else if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        "skilldeck-aarch64-apple-darwin.tar.xz"
+    } else if cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") {
+        "skilldeck-x86_64-pc-windows-msvc.zip"
+    } else {
+        panic!("unsupported test target")
+    };
+    if asset.ends_with(".zip") {
+        return (asset.to_string(), zip_with_skilldeck(bytes));
+    }
+    let mut out = Vec::new();
+    {
+        let enc = xz2::write::XzEncoder::new(&mut out, 6);
+        let mut tar = tar::Builder::new(enc);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            format!("skilldeck/{}/{}", "bin", exe_name()),
+            bytes,
+        )
+        .unwrap();
+        let enc = tar.into_inner().unwrap();
+        enc.finish().unwrap();
+    }
+    (asset.to_string(), out)
+}
+
+struct TestServer {
+    url: String,
+    hits: Arc<Mutex<Vec<String>>>,
+    alive: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl TestServer {
+    fn new(routes: Vec<(&'static str, Vec<u8>, &'static str)>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let routes: Vec<_> = routes
+            .into_iter()
+            .map(|(p, b, ct)| {
+                let body = if let Ok(text) = String::from_utf8(b.clone()) {
+                    text.replace("http://placeholder", &url).into_bytes()
+                } else {
+                    b
+                };
+                (p.to_string(), body, ct.to_string())
+            })
+            .collect();
+        listener.set_nonblocking(true).unwrap();
+        let hits = Arc::new(Mutex::new(Vec::new()));
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_hits = hits.clone();
+        let thread_alive = alive.clone();
+        let handle = thread::spawn(move || {
+            while thread_alive.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("/")
+                    .to_string();
+                thread_hits.lock().unwrap().push(path.clone());
+                let route = routes.iter().find(|(p, _, _)| *p == path);
+                if let Some((_, body, ct)) = route {
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        ct,
+                        body.len()
+                    ).unwrap();
+                    stream.write_all(body).unwrap();
+                } else {
+                    let body = b"not found";
+                    write!(
+                        stream,
+                        "HTTP/1.1 404 Not Found\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .unwrap();
+                    stream.write_all(body).unwrap();
+                }
+            }
+        });
+        Self {
+            url,
+            hits,
+            alive,
+            handle: Some(handle),
+        }
+    }
+
+    fn hits(&self) -> Vec<String> {
+        self.hits.lock().unwrap().clone()
+    }
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(self.url.trim_start_matches("http://"));
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn release_json(base: &str, tag: &str, draft: bool, prerelease: bool, asset: &str) -> String {
+    format!(
+        r#"[{{"tag_name":"v9.0.0","draft":true,"prerelease":false,"assets":[]}},{{"tag_name":"v8.0.0","draft":false,"prerelease":true,"assets":[]}},{{"tag_name":"{}","draft":{},"prerelease":{},"assets":[{{"name":"{}","browser_download_url":"{}/archive"}},{{"name":"{}.sha256","browser_download_url":"{}/archive.sha256"}}]}}]"#,
+        tag, draft, prerelease, asset, base, asset, base
+    )
+}
+
+#[test]
+fn upgrade_check_current_and_available_exit_success_without_download() {
+    let tmp = TempDir::new().unwrap();
+    let asset = "skilldeck-test.zip";
+    let server = TestServer::new(vec![(
+        "/releases",
+        release_json("http://placeholder", "v0.1.2", false, false, asset).into_bytes(),
+        "application/json",
+    )]);
+    bin()
+        .env("SKILLDECK_UPGRADE_BASE_URL", &server.url)
+        .env("SKILLDECK_UPGRADE_ASSET", asset)
+        .env("SKILLDECK_CACHE_DIR", tmp.path().join("cache"))
+        .args(["upgrade", "--check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("up to date"));
+    assert!(!server.hits().contains(&"/archive".to_string()));
+
+    let server = TestServer::new(vec![(
+        "/releases",
+        release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+        "application/json",
+    )]);
+    bin()
+        .env("SKILLDECK_UPGRADE_BASE_URL", &server.url)
+        .env("SKILLDECK_UPGRADE_ASSET", asset)
+        .env("SKILLDECK_CACHE_DIR", tmp.path().join("cache2"))
+        .args(["upgrade", "--check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Update available"))
+        .stdout(predicate::str::contains("Run `skilldeck upgrade`"));
+    assert!(!server.hits().contains(&"/archive".to_string()));
+}
+
+#[test]
+fn upgrade_actual_current_exe_self_replace_path_keeps_copied_binary_runnable() {
+    let tmp = TempDir::new().unwrap();
+    let source = assert_cmd::cargo::cargo_bin("skilldeck");
+    let copied = tmp.path().join(exe_name());
+    fs::copy(&source, &copied).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&source).unwrap().permissions().mode();
+        fs::set_permissions(&copied, fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let bytes = fs::read(&source).unwrap();
+    let (asset, archive) = platform_archive_with_skilldeck(&bytes);
+    let checksum = format!("{}  {asset}\n", sha256_hex(&archive));
+    let server = TestServer::new(vec![
+        (
+            "/releases",
+            release_json("http://placeholder", "v0.1.3", false, false, &asset).into_bytes(),
+            "application/json",
+        ),
+        ("/archive", archive, "application/octet-stream"),
+        (
+            "/archive.sha256",
+            checksum.as_bytes().to_vec(),
+            "text/plain",
+        ),
+    ]);
+    Command::new(&copied)
+        .env("SKILLDECK_UPGRADE_BASE_URL", &server.url)
+        .env("SKILLDECK_CACHE_DIR", tmp.path().join("cache"))
+        .args(["upgrade", "--yes"])
+        .output()
+        .map(|output| {
+            assert!(
+                output.status.success(),
+                "upgrade failed\nstdout={}\nstderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        })
+        .unwrap();
+    let output = Command::new(&copied).arg("version").output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+#[test]
+fn upgrade_no_eof_preserves_target_and_yes_replaces_after_checksum() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join(if cfg!(windows) {
+        "skilldeck.exe"
+    } else {
+        "skilldeck"
+    });
+    fs::write(&target, b"old-binary").unwrap();
+    let archive = zip_with_skilldeck(b"new-binary");
+    let checksum = format!("{}  skilldeck-test.zip\n", sha256_hex(&archive));
+    let asset = "skilldeck-test.zip";
+
+    let server = TestServer::new(vec![
+        (
+            "/releases",
+            release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+            "application/json",
+        ),
+        ("/archive", archive.clone(), "application/octet-stream"),
+        (
+            "/archive.sha256",
+            checksum.as_bytes().to_vec(),
+            "text/plain",
+        ),
+    ]);
+    bin()
+        .env("SKILLDECK_UPGRADE_BASE_URL", &server.url)
+        .env("SKILLDECK_UPGRADE_ASSET", asset)
+        .env("SKILLDECK_UPGRADE_EXE", &target)
+        .env("SKILLDECK_CACHE_DIR", tmp.path().join("cache"))
+        .arg("upgrade")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Upgrade cancelled"));
+    assert_eq!(fs::read(&target).unwrap(), b"old-binary");
+
+    bin()
+        .env("SKILLDECK_UPGRADE_BASE_URL", &server.url)
+        .env("SKILLDECK_UPGRADE_ASSET", asset)
+        .env("SKILLDECK_UPGRADE_EXE", &target)
+        .env("SKILLDECK_CACHE_DIR", tmp.path().join("cache"))
+        .args(["upgrade", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Upgraded Skilldeck"));
+    assert_eq!(fs::read(&target).unwrap(), b"new-binary");
+}
+
+#[test]
+fn upgrade_readonly_target_fails_with_package_manager_caveat() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join(if cfg!(windows) {
+        "skilldeck.exe"
+    } else {
+        "skilldeck"
+    });
+    fs::write(&target, b"old").unwrap();
+    let original_perms = fs::metadata(&target).unwrap().permissions();
+    let mut perms = original_perms.clone();
+    perms.set_readonly(true);
+    fs::set_permissions(&target, perms).unwrap();
+    let archive = zip_with_skilldeck(b"new");
+    let checksum = format!("{}  skilldeck-test.zip\n", sha256_hex(&archive));
+    let asset = "skilldeck-test.zip";
+    let server = TestServer::new(vec![
+        (
+            "/releases",
+            release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+            "application/json",
+        ),
+        ("/archive", archive, "application/octet-stream"),
+        (
+            "/archive.sha256",
+            checksum.as_bytes().to_vec(),
+            "text/plain",
+        ),
+    ]);
+    bin()
+        .env("SKILLDECK_UPGRADE_BASE_URL", &server.url)
+        .env("SKILLDECK_UPGRADE_ASSET", asset)
+        .env("SKILLDECK_UPGRADE_EXE", &target)
+        .env("SKILLDECK_CACHE_DIR", tmp.path().join("cache"))
+        .args(["upgrade", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("package manager"));
+    fs::set_permissions(&target, original_perms).unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"old");
+}
+
+#[test]
+fn upgrade_checksum_mismatch_and_http_failures_preserve_target() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join(if cfg!(windows) {
+        "skilldeck.exe"
+    } else {
+        "skilldeck"
+    });
+    fs::write(&target, b"old").unwrap();
+    let archive = zip_with_skilldeck(b"new");
+    let asset = "skilldeck-test.zip";
+    let server = TestServer::new(vec![
+        (
+            "/releases",
+            release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+            "application/json",
+        ),
+        ("/archive", archive, "application/octet-stream"),
+        (
+            "/archive.sha256",
+            b"deadbeef  skilldeck-test.zip\n".to_vec(),
+            "text/plain",
+        ),
+    ]);
+    bin()
+        .env("SKILLDECK_UPGRADE_BASE_URL", &server.url)
+        .env("SKILLDECK_UPGRADE_ASSET", asset)
+        .env("SKILLDECK_UPGRADE_EXE", &target)
+        .env("SKILLDECK_CACHE_DIR", tmp.path().join("cache"))
+        .args(["upgrade", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("checksum mismatch"));
+    assert_eq!(fs::read(&target).unwrap(), b"old");
+
+    let server = TestServer::new(vec![("/releases", b"[]".to_vec(), "application/json")]);
+    bin()
+        .env("SKILLDECK_UPGRADE_BASE_URL", &server.url)
+        .env("SKILLDECK_UPGRADE_ASSET", asset)
+        .env("SKILLDECK_UPGRADE_EXE", &target)
+        .env("SKILLDECK_CACHE_DIR", tmp.path().join("cache2"))
+        .args(["upgrade", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no stable"));
+    assert_eq!(fs::read(&target).unwrap(), b"old");
 }

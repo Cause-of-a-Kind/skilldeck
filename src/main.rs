@@ -5,6 +5,7 @@ mod fsops;
 mod git;
 mod manifest;
 mod ops;
+mod upgrade;
 
 use anyhow::Result;
 use clap::Parser;
@@ -19,11 +20,16 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    let should_notify = should_notify_after(&cli.command);
+    let result = match cli.command {
         Commands::Init(args) => ops::init(args),
         Commands::Install(args) => ops::install(args, false),
         Commands::InstallGroup(args) => ops::install_group(args),
         Commands::Update(args) => ops::update(args),
+        Commands::Upgrade(args) => upgrade::run(upgrade::UpgradeOptions {
+            yes: args.yes,
+            check: args.check,
+        }),
         Commands::Remove(args) => ops::remove(args),
         Commands::RemoveGroup(args) => ops::remove_group(args),
         Commands::Doctor(args) => ops::doctor(args),
@@ -32,5 +38,17 @@ fn run() -> Result<()> {
             println!("{}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+    };
+    if result.is_ok() && should_notify {
+        upgrade::maybe_notify();
+    }
+    result
+}
+
+fn should_notify_after(command: &Commands) -> bool {
+    match command {
+        Commands::Upgrade(_) | Commands::Version => false,
+        Commands::List(args) if args.json => false,
+        _ => true,
     }
 }
