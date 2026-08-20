@@ -1,6 +1,76 @@
-use std::{path::Path, process::Command};
+use std::{fmt, path::Path, process::Command};
 
 use anyhow::{anyhow, Context, Result};
+
+const INITIAL_COMMIT_MESSAGE: &str = "Start Skilldeck catalog";
+
+#[derive(Debug)]
+pub struct BootstrapGitError {
+    pub step: BootstrapGitStep,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapGitStep {
+    Init,
+    Add,
+    Commit,
+}
+
+impl fmt::Display for BootstrapGitStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Init => "git init",
+            Self::Add => "git add",
+            Self::Commit => "git commit",
+        })
+    }
+}
+
+pub fn initial_commit_message() -> &'static str {
+    INITIAL_COMMIT_MESSAGE
+}
+
+pub fn initialize_catalog_repository(catalog: &Path) -> std::result::Result<(), BootstrapGitError> {
+    run_catalog_git(
+        catalog,
+        BootstrapGitStep::Init,
+        &["init", "--initial-branch=main"],
+    )?;
+    run_catalog_git(catalog, BootstrapGitStep::Add, &["add", "."])?;
+    run_catalog_git(
+        catalog,
+        BootstrapGitStep::Commit,
+        &["commit", "-m", INITIAL_COMMIT_MESSAGE],
+    )?;
+    Ok(())
+}
+
+fn run_catalog_git(
+    catalog: &Path,
+    step: BootstrapGitStep,
+    args: &[&str],
+) -> std::result::Result<(), BootstrapGitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(catalog)
+        .args(args)
+        .output()
+        .map_err(|err| BootstrapGitError {
+            step,
+            detail: err.to_string(),
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Err(BootstrapGitError {
+            step,
+            detail: if !stderr.is_empty() { stderr } else { stdout },
+        })
+    }
+}
 
 pub fn clone_repository(
     repository: &str,

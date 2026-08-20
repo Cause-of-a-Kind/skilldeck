@@ -60,6 +60,9 @@ pub struct BootstrapArgs {
     /// Create only the catalog structure and commented example formats.
     #[arg(long, conflicts_with = "quickstart")]
     pub empty: bool,
+    /// Generate files only; do not initialize or commit a local Git repository.
+    #[arg(long)]
+    pub no_git: bool,
 }
 
 #[derive(Args, Debug)]

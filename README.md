@@ -6,17 +6,17 @@ Skilldeck is catalog-agnostic: catalogs can live in public or private Git reposi
 
 ## Install
 
-Install the latest published v0.1.2 GitHub Release on Linux/macOS:
+Install the latest published v0.1.3 GitHub Release on Linux/macOS:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.2/skilldeck-installer.sh | sh
+  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.3/skilldeck-installer.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.2/skilldeck-installer.ps1 | iex
+irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.1.3/skilldeck-installer.ps1 | iex
 ```
 
 Security note: piping installers directly to a shell is convenient but optional. You can download the installer or archive first, inspect it, verify the `.sha256` file or `sha256.sum`, and run it locally.
@@ -64,21 +64,37 @@ skilldeck bootstrap ./skilldeck-catalog --empty
 
 Without arguments in an interactive terminal, `bootstrap` asks where to create the catalog and whether to use the quickstart or empty template. In non-interactive use, provide both a path and exactly one template flag.
 
+By default, `bootstrap` uses system Git to initialize the generated catalog as an immediately clonable local repository on branch `main`, stages the generated files, and creates the initial commit `Start Skilldeck catalog`. It does not create remotes, push, or change global Skilldeck config. Use `--no-git` to generate files only.
+
 `bootstrap` creates a missing destination or uses an existing genuinely empty directory. It refuses symlinks, non-empty destinations, and never overwrites; there is no `--force`.
 
-Typical next steps:
+Typical default flow:
+
+```sh
+skilldeck bootstrap ./skilldeck-catalog --quickstart
+skilldeck init --repository ./skilldeck-catalog --reference main
+skilldeck doctor
+skilldeck install-group quickstart ./skills
+```
+
+Optionally publish the catalog after bootstrap:
 
 ```sh
 cd skilldeck-catalog
-git init --initial-branch=main
-git add .
-git commit -m "Start Skilldeck catalog"
 git remote add origin <your-catalog-url>
 git push -u origin main
 skilldeck init --repository <your-catalog-url> --reference main
-skilldeck doctor
-skilldeck install-group quickstart ../skills
 ```
+
+If you pass `--no-git`, initialize manually from inside the generated directory:
+
+```sh
+git init --initial-branch=main
+git add .
+git commit -m "Start Skilldeck catalog"
+```
+
+If the automatic commit fails because Git identity is missing, the catalog files remain in place and are already initialized/staged. Configure `user.name` and `user.email`, then run `git commit -m "Start Skilldeck catalog"` from inside the catalog directory.
 
 ## Catalog format
 
@@ -177,10 +193,10 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-targets --all-features
 cargo llvm-cov --workspace --all-targets --all-features --summary-only --fail-under-lines 85
 git diff --check
-cargo dist generate
-cargo dist plan
+dist generate --mode ci --check --allow-dirty
+dist plan --tag v0.1.4 --allow-dirty
 ```
 
-GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.1.2` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
+GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.1.3` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
 
 crates.io publishing remains disabled while the CLI surface stabilizes.

@@ -18,7 +18,8 @@ Use this skill to help a user operate `skilldeck` safely and predictably. Skilld
 - `skilldeck remove <name> <install-directory>` — remove one installed skill by directory name.
 - `skilldeck remove-group <group> <install-directory>` — remove currently installed members of a catalog group.
 - `skilldeck init --repository <url-or-path> --reference <ref>` — configure the user's catalog.
-- `skilldeck bootstrap <path> --quickstart|--empty` — create a new catalog scaffold.
+- `skilldeck bootstrap <path> --quickstart|--empty` — create a new catalog scaffold and, by default, initialize/commit it as a local Git repository on branch `main`.
+- `skilldeck bootstrap <path> --quickstart|--empty --no-git` — generate catalog files only.
 
 ## Update vs upgrade
 
@@ -40,13 +41,11 @@ When a user asks to get started:
 
 ```sh
 skilldeck bootstrap ./skilldeck-catalog --quickstart
-cd skilldeck-catalog
-git init --initial-branch=main
-git add .
-git commit -m "Start Skilldeck catalog"
-skilldeck init --repository . --reference main
+skilldeck init --repository ./skilldeck-catalog --reference main
 skilldeck doctor
-skilldeck install-group quickstart ../installed-skills
+skilldeck install-group quickstart ./installed-skills
 ```
+
+If the user chooses `--no-git`, tell them to run `git init --initial-branch=main`, `git add .`, and `git commit -m "Start Skilldeck catalog"` from inside the generated catalog before configuring Skilldeck. If automatic commit fails because Git identity is missing, explain that files exist and are staged; configure `user.name` and `user.email`, then run that commit command.
 
 Adjust paths for the user's shell and operating system. Keep output portable; avoid shell-specific syntax unless the user is already using that shell.

@@ -21,6 +21,15 @@ fn bin() -> assert_cmd::Command {
     assert_cmd::Command::cargo_bin("skilldeck").unwrap()
 }
 
+fn bootstrap_bin() -> assert_cmd::Command {
+    let mut cmd = bin();
+    cmd.env("GIT_AUTHOR_NAME", "Skilldeck Test")
+        .env("GIT_AUTHOR_EMAIL", "skilldeck-test@example.com")
+        .env("GIT_COMMITTER_NAME", "Skilldeck Test")
+        .env("GIT_COMMITTER_EMAIL", "skilldeck-test@example.com");
+    cmd
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let status = Command::new("git")
         .arg("-C")
@@ -29,6 +38,34 @@ fn git(dir: &Path, args: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "git {:?} failed", args);
+}
+
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn assert_bootstrap_git_repo(dest: &Path) {
+    assert!(dest.join(".git").is_dir());
+    assert_eq!(git_stdout(dest, &["branch", "--show-current"]), "main");
+    assert_eq!(git_stdout(dest, &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(
+        git_stdout(dest, &["log", "-1", "--pretty=%s"]),
+        "Start Skilldeck catalog"
+    );
+    assert!(git_stdout(dest, &["status", "--porcelain"]).is_empty());
+    assert!(git_stdout(dest, &["ls-files"]).contains("README.md"));
 }
 
 fn file_url(path: &Path) -> String {
@@ -1613,7 +1650,7 @@ fn upgrade_check_current_and_available_exit_success_without_download() {
     let asset = "skilldeck-test.zip";
     let server = TestServer::new(vec![(
         "/releases",
-        release_json("http://placeholder", "v0.1.3", false, false, asset).into_bytes(),
+        release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
         "application/json",
     )]);
     bin()
@@ -1628,7 +1665,7 @@ fn upgrade_check_current_and_available_exit_success_without_download() {
 
     let server = TestServer::new(vec![(
         "/releases",
-        release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
+        release_json("http://placeholder", "v0.1.5", false, false, asset).into_bytes(),
         "application/json",
     )]);
     bin()
@@ -1661,7 +1698,7 @@ fn upgrade_actual_current_exe_self_replace_path_keeps_copied_binary_runnable() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.4", false, false, &asset).into_bytes(),
+            release_json("http://placeholder", "v0.1.5", false, false, &asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1709,7 +1746,7 @@ fn upgrade_no_eof_preserves_target_and_yes_replaces_after_checksum() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v0.1.5", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive.clone(), "application/octet-stream"),
@@ -1761,7 +1798,7 @@ fn upgrade_readonly_target_fails_with_package_manager_caveat() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v0.1.5", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1798,7 +1835,7 @@ fn upgrade_checksum_mismatch_and_http_failures_preserve_target() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v0.1.5", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1837,28 +1874,37 @@ fn bootstrap_quickstart_explicit_creates_expected_catalog_without_config() {
     let tmp = TempDir::new().unwrap();
     let dest = tmp.path().join("my catalog");
     let cfg = tmp.path().join("cfg");
-    bin()
+    bootstrap_bin()
         .env("SKILLDECK_CONFIG_DIR", &cfg)
         .args(["bootstrap", dest.to_str().unwrap(), "--quickstart"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Created Skilldeck catalog"))
-        .stdout(predicate::str::contains("Next steps:"))
-        .stdout(predicate::str::contains("Review the generated files"))
-        .stdout(predicate::str::contains("From inside that directory"))
-        .stdout(predicate::str::contains("git init --initial-branch=main"))
         .stdout(predicate::str::contains(
-            "skilldeck init --repository <your-catalog-git-url> --reference main",
+            "Git repository initialized on branch main",
+        ))
+        .stdout(predicate::str::contains(
+            "initial commit `Start Skilldeck catalog`",
+        ))
+        .stdout(predicate::str::contains("Next steps:"))
+        .stdout(predicate::str::contains("optionally add a remote"))
+        .stdout(predicate::str::contains(
+            "From inside the generated directory",
+        ))
+        .stdout(predicate::str::contains(
+            "skilldeck init --repository . --reference main",
         ))
         .stdout(predicate::str::contains("skilldeck doctor"))
         .stdout(predicate::str::contains(
             "skilldeck install-group quickstart <install-directory>",
         ))
+        .stdout(predicate::str::contains("git init --initial-branch=main").not())
         .stdout(predicate::str::contains("cd ").not());
 
     assert!(!cfg.exists(), "bootstrap must not mutate global config");
     let readme = fs::read_to_string(dest.join("README.md")).unwrap();
     assert!(readme.contains("git init --initial-branch=main"));
+    assert!(readme.contains("--no-git"));
     assert!(dest.join("README.md").is_file());
     let skill = fs::read_to_string(dest.join("skills/hello-world/SKILL.md")).unwrap();
     assert!(skill.contains("name: hello-world"));
@@ -1866,13 +1912,13 @@ fn bootstrap_quickstart_explicit_creates_expected_catalog_without_config() {
     let external = fs::read_to_string(dest.join("external-skills.toml")).unwrap();
     assert!(external.contains("https://github.com/Cause-of-a-Kind/skilldeck.git"));
     assert!(external.contains("subdirectory = \"examples/skilldeck-skill\""));
-    assert!(external.contains("ref = \"v0.1.3\""));
+    assert!(external.contains("ref = \"v0.1.4\""));
     assert_eq!(
         fs::read_to_string(dest.join("skill-groups.toml")).unwrap(),
         "[groups.quickstart]\nskills = \"hello-world skilldeck\"\n"
     );
+    assert_bootstrap_git_repo(&dest);
 
-    commit_repo(&dest);
     bin()
         .env("SKILLDECK_CONFIG_DIR", tmp.path().join("cfg2"))
         .env("SKILLDECK_NO_UPDATE_CHECK", "1")
@@ -1881,7 +1927,7 @@ fn bootstrap_quickstart_explicit_creates_expected_catalog_without_config() {
             "--catalog-repository",
             dest.to_str().unwrap(),
             "--catalog-ref",
-            "master",
+            "main",
         ])
         .assert()
         .success()
@@ -1893,10 +1939,14 @@ fn bootstrap_empty_explicit_accepts_existing_empty_directory() {
     let tmp = TempDir::new().unwrap();
     let dest = tmp.path().join("empty-dest");
     fs::create_dir(&dest).unwrap();
-    bin()
+    bootstrap_bin()
         .args(["bootstrap", dest.to_str().unwrap(), "--empty"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains(
+            "Git repository initialized on branch main",
+        ))
+        .stdout(predicate::str::contains("install-group quickstart").not());
     assert!(dest.join("skills/.gitkeep").is_file());
     assert!(fs::read_to_string(dest.join("external-skills.toml"))
         .unwrap()
@@ -1908,6 +1958,110 @@ fn bootstrap_empty_explicit_accepts_existing_empty_directory() {
         .unwrap();
     toml::from_str::<toml::Value>(&fs::read_to_string(dest.join("skill-groups.toml")).unwrap())
         .unwrap();
+    assert_bootstrap_git_repo(&dest);
+}
+
+#[test]
+fn bootstrap_no_git_generates_files_without_repository_and_manual_output() {
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("no-git-catalog");
+    bin()
+        .args([
+            "bootstrap",
+            dest.to_str().unwrap(),
+            "--quickstart",
+            "--no-git",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Git initialization skipped"))
+        .stdout(predicate::str::contains("git init --initial-branch=main"))
+        .stdout(predicate::str::contains(
+            "git commit -m \"Start Skilldeck catalog\"",
+        ));
+    assert!(dest.join("skills/hello-world/SKILL.md").is_file());
+    assert!(!dest.join(".git").exists());
+}
+
+#[test]
+fn bootstrap_git_identity_failure_preserves_initialized_staged_repo() {
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("identity-failure");
+    let home = tmp.path().join("home");
+    fs::create_dir(&home).unwrap();
+    bin()
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("GIT_CONFIG_GLOBAL", tmp.path().join("missing-gitconfig"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_AUTHOR_NAME")
+        .env_remove("GIT_AUTHOR_EMAIL")
+        .env_remove("GIT_COMMITTER_NAME")
+        .env_remove("GIT_COMMITTER_EMAIL")
+        .env_remove("EMAIL")
+        .args(["bootstrap", dest.to_str().unwrap(), "--empty"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("git commit failed"))
+        .stderr(predicate::str::contains(
+            "Catalog files exist and Git is initialized/staged",
+        ))
+        .stderr(predicate::str::contains(
+            "because Git identity is not configured",
+        ))
+        .stderr(predicate::str::contains(
+            "From inside the generated repository",
+        ))
+        .stderr(predicate::str::contains("git config user.name"))
+        .stderr(predicate::str::contains("git config user.email"))
+        .stderr(predicate::str::contains(
+            "git commit -m \"Start Skilldeck catalog\"",
+        ));
+
+    assert!(dest.join(".git").is_dir());
+    assert!(dest.join("README.md").is_file());
+    let status = git_stdout(&dest, &["status", "--porcelain"]);
+    assert!(status.lines().any(|line| line.starts_with('A')), "{status}");
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&dest)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(!head.status.success(), "commit should not exist");
+}
+
+#[test]
+fn bootstrap_generic_commit_failure_preserves_staged_repo_without_identity_advice() {
+    let tmp = TempDir::new().unwrap();
+    let dest = tmp.path().join("signing-failure");
+    bin()
+        .env("GIT_AUTHOR_NAME", "Skilldeck Test")
+        .env("GIT_AUTHOR_EMAIL", "skilldeck-test@example.com")
+        .env("GIT_COMMITTER_NAME", "Skilldeck Test")
+        .env("GIT_COMMITTER_EMAIL", "skilldeck-test@example.com")
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+        .env("GIT_CONFIG_VALUE_0", "true")
+        .env("GIT_CONFIG_KEY_1", "gpg.program")
+        .env("GIT_CONFIG_VALUE_1", "false")
+        .args(["bootstrap", dest.to_str().unwrap(), "--empty"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("git commit failed"))
+        .stderr(predicate::str::contains(
+            "Catalog files exist and Git is initialized/staged",
+        ))
+        .stderr(predicate::str::contains("Fix the Git error"))
+        .stderr(predicate::str::contains(
+            "git commit -m \"Start Skilldeck catalog\"",
+        ))
+        .stderr(predicate::str::contains("git config user.name").not())
+        .stderr(predicate::str::contains("git config user.email").not());
+
+    assert!(dest.join(".git").is_dir());
+    let status = git_stdout(&dest, &["status", "--porcelain"]);
+    assert!(status.lines().any(|line| line.starts_with('A')), "{status}");
 }
 
 #[test]
@@ -1957,7 +2111,7 @@ fn bootstrap_noninteractive_missing_inputs_and_conflicts_fail() {
 #[test]
 fn bootstrap_interactive_defaults_and_empty_choice_work_with_stdin() {
     let tmp = TempDir::new().unwrap();
-    let mut cmd = bin();
+    let mut cmd = bootstrap_bin();
     cmd.current_dir(tmp.path())
         .arg("bootstrap")
         .write_stdin("\nnope\n2\n")
@@ -1970,18 +2124,18 @@ fn bootstrap_interactive_defaults_and_empty_choice_work_with_stdin() {
         .stderr(predicate::str::contains(
             "Unknown bootstrap template `nope`",
         ));
-    assert!(tmp
-        .path()
-        .join("skilldeck-catalog/skills/.gitkeep")
-        .is_file());
+    let default_dest = tmp.path().join("skilldeck-catalog");
+    assert!(default_dest.join("skills/.gitkeep").is_file());
+    assert_bootstrap_git_repo(&default_dest);
 
     let dest = tmp.path().join("chosen empty");
-    bin()
+    bootstrap_bin()
         .arg("bootstrap")
         .write_stdin(format!("{}\nempty\n", dest.display()))
         .assert()
         .success();
     assert!(dest.join("skills/.gitkeep").is_file());
+    assert_bootstrap_git_repo(&dest);
 }
 
 #[cfg(unix)]
@@ -2016,6 +2170,7 @@ fn public_skilldeck_example_skill_exists_and_mentions_safe_commands() {
         "Update vs upgrade",
         "--force",
         "git init --initial-branch=main",
+        "--no-git",
     ] {
         assert!(body.contains(needle), "missing {needle}");
     }
@@ -2025,13 +2180,14 @@ fn public_skilldeck_example_skill_exists_and_mentions_safe_commands() {
 fn bootstrap_creates_nested_paths_with_spaces() {
     let tmp = TempDir::new().unwrap();
     let dest = tmp.path().join("nested parent/catalog with spaces");
-    bin()
+    bootstrap_bin()
         .args(["bootstrap", dest.to_str().unwrap(), "--quickstart"])
         .assert()
         .success()
         .stdout(predicate::str::contains(dest.display().to_string()))
         .stdout(predicate::str::contains("cd ").not());
     assert!(dest.join("skills/hello-world/SKILL.md").is_file());
+    assert_bootstrap_git_repo(&dest);
     let parent = tmp.path().join("nested parent");
     assert!(fs::read_dir(parent).unwrap().all(|entry| !entry
         .unwrap()

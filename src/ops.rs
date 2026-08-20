@@ -130,28 +130,89 @@ pub fn bootstrap(args: BootstrapArgs) -> Result<()> {
     };
 
     create_bootstrap_catalog(&path, template)?;
-    print_bootstrap_success(&path, template);
+    if args.no_git {
+        print_bootstrap_success(&path, template, false);
+    } else if let Err(err) = git::initialize_catalog_repository(&path) {
+        return Err(bootstrap_git_error(&path, err));
+    } else {
+        print_bootstrap_success(&path, template, true);
+    }
     Ok(())
 }
 
-fn print_bootstrap_success(path: &Path, template: BootstrapTemplate) {
+fn print_bootstrap_success(path: &Path, template: BootstrapTemplate, git_initialized: bool) {
     println!("Created Skilldeck catalog at {}", path.display());
-    println!("Next steps:");
-    println!("  1. Review the generated files in {}", path.display());
-    println!("  2. From inside that directory, initialize and publish the catalog with Git:");
-    println!("     git init --initial-branch=main");
-    println!("     git add .");
-    println!("     git commit -m \"Start Skilldeck catalog\"");
-    println!("     git remote add origin <your-catalog-git-url>");
-    println!("     git push -u origin main");
-    println!("  3. Configure Skilldeck:");
-    println!("     skilldeck init --repository <your-catalog-git-url> --reference main");
-    println!("  4. Validate the catalog:");
-    println!("     skilldeck doctor");
-    if template == BootstrapTemplate::Quickstart {
-        println!("  5. Try the quickstart group:");
-        println!("     skilldeck install-group quickstart <install-directory>");
+    if git_initialized {
+        println!("Git repository initialized on branch main with initial commit `Start Skilldeck catalog`.");
+        println!("Next steps:");
+        println!("  1. From inside the generated directory, optionally add a remote and push:");
+        println!("     git remote add origin <your-catalog-git-url>");
+        println!("     git push -u origin main");
+        println!("  2. From inside the generated directory, configure Skilldeck:");
+        println!("     skilldeck init --repository . --reference main");
+        println!("     # or, after pushing: skilldeck init --repository <your-catalog-git-url> --reference main");
+        println!("  3. Validate the catalog:");
+        println!("     skilldeck doctor");
+        if template == BootstrapTemplate::Quickstart {
+            println!("  4. Try the quickstart group:");
+            println!("     skilldeck install-group quickstart <install-directory>");
+        }
+    } else {
+        println!("Git initialization skipped because --no-git was used.");
+        println!("Next steps:");
+        println!("  1. Review the generated files in {}", path.display());
+        println!("  2. From inside that directory, initialize and publish the catalog with Git:");
+        println!("     git init --initial-branch=main");
+        println!("     git add .");
+        println!("     git commit -m \"Start Skilldeck catalog\"");
+        println!("     git remote add origin <your-catalog-git-url>");
+        println!("     git push -u origin main");
+        println!("  3. Configure Skilldeck:");
+        println!("     skilldeck init --repository <your-catalog-git-url> --reference main");
+        println!("  4. Validate the catalog:");
+        println!("     skilldeck doctor");
+        if template == BootstrapTemplate::Quickstart {
+            println!("  5. Try the quickstart group:");
+            println!("     skilldeck install-group quickstart <install-directory>");
+        }
     }
+}
+
+fn bootstrap_git_error(path: &Path, err: git::BootstrapGitError) -> anyhow::Error {
+    if err.step == git::BootstrapGitStep::Commit {
+        if commit_failure_is_identity_error(&err.detail) {
+            anyhow!(
+                "{} failed while bootstrapping {} because Git identity is not configured. Catalog files exist and Git is initialized/staged. From inside the generated repository, configure identity with `git config user.name <name>` and `git config user.email <email>`, then run `git commit -m \"{}\"`. Details: {}",
+                err.step,
+                path.display(),
+                git::initial_commit_message(),
+                err.detail
+            )
+        } else {
+            anyhow!(
+                "{} failed while bootstrapping {}. Catalog files exist and Git is initialized/staged. Fix the Git error, then run `git commit -m \"{}\"` from inside the generated repository. Details: {}",
+                err.step,
+                path.display(),
+                git::initial_commit_message(),
+                err.detail
+            )
+        }
+    } else {
+        anyhow!(
+            "{} failed while bootstrapping {}. Catalog files were left in place; fix the Git issue, then continue manually. Details: {}",
+            err.step,
+            path.display(),
+            err.detail
+        )
+    }
+}
+
+fn commit_failure_is_identity_error(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("author identity unknown")
+        || detail.contains("committer identity unknown")
+        || detail.contains("unable to auto-detect email")
+        || detail.contains("empty ident")
 }
 
 fn prompt_bootstrap_template() -> Result<BootstrapTemplate> {
@@ -287,30 +348,31 @@ This catalog was generated by `skilldeck bootstrap --quickstart`.
 ## What's included
 
 - `skills/hello-world/SKILL.md` — a first-party example skill you can edit or replace.
-- `external-skills.toml` — an external `skilldeck` skill pinned to Skilldeck v0.1.3.
+- `external-skills.toml` — an external `skilldeck` skill pinned to Skilldeck v0.1.4.
 - `skill-groups.toml` — a `quickstart` group containing both skills.
 
 ## Try it locally
 
+By default, `skilldeck bootstrap` already initialized this directory as a Git repository on branch `main` and created the initial commit `Start Skilldeck catalog`.
+
 ```sh
-skilldeck init --repository <git-url-for-this-catalog> --reference main
+skilldeck init --repository . --reference main
 skilldeck doctor
 skilldeck list
 skilldeck install-group quickstart ./installed-skills
 ```
 
-For a local-only test before publishing, initialize Git here and use this directory as the repository path.
+If this catalog was generated with `--no-git`, initialize it manually from inside this directory first:
 
 ```sh
 git init --initial-branch=main
 git add .
 git commit -m "Start Skilldeck catalog"
-skilldeck init --repository . --reference main
 ```
 
 ## Make it yours
 
-Edit `skills/hello-world/SKILL.md`, add more directories under `skills/`, then update `skill-groups.toml`. Push the catalog to your Git host and point Skilldeck at that URL with `skilldeck init`.
+Edit `skills/hello-world/SKILL.md`, add more directories under `skills/`, then update `skill-groups.toml`. Push the catalog to your Git host if desired and point Skilldeck at either this local path or that URL with `skilldeck init`.
 "#;
 
 const HELLO_WORLD_SKILL: &str = r#"---
@@ -336,7 +398,7 @@ Do not commit, push, delete files, or change global configuration unless the use
 const QUICKSTART_EXTERNAL_SKILLS: &str = r#"[skills.skilldeck]
 source = "https://github.com/Cause-of-a-Kind/skilldeck.git"
 subdirectory = "examples/skilldeck-skill"
-ref = "v0.1.3"
+ref = "v0.1.4"
 "#;
 
 const QUICKSTART_SKILL_GROUPS: &str = r#"[groups.quickstart]
@@ -371,7 +433,7 @@ Edit `skill-groups.toml`:
 # skills = "example another-skill"
 ```
 
-Publish this directory with Git, then run `skilldeck init --repository <url> --reference <branch-or-tag>` and `skilldeck doctor`.
+By default, `skilldeck bootstrap` initializes this directory as a Git repository on branch `main` and creates the initial commit `Start Skilldeck catalog`. Run `skilldeck init --repository <path-or-url> --reference main` and `skilldeck doctor`. If generated with `--no-git`, initialize and commit manually first.
 "#;
 
 const EMPTY_EXTERNAL_SKILLS: &str = r#"# External skills are optional.
@@ -989,5 +1051,57 @@ fn dir_name_for(requested: &str) -> String {
         fsops::package_name_from_url(requested)
     } else {
         requested.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn commit_failure_identity_classification_known_git_phrases() {
+        assert!(commit_failure_is_identity_error("Author identity unknown"));
+        assert!(commit_failure_is_identity_error(
+            "fatal: unable to auto-detect email address"
+        ));
+        assert!(commit_failure_is_identity_error(
+            "empty ident name (for <>) not allowed"
+        ));
+        assert!(commit_failure_is_identity_error(
+            "Committer identity unknown"
+        ));
+        assert!(!commit_failure_is_identity_error(
+            "gpg failed to sign the data"
+        ));
+    }
+
+    #[test]
+    fn bootstrap_git_error_formats_identity_and_generic_commit_failures() {
+        let path = Path::new("catalog with spaces");
+        let identity = bootstrap_git_error(
+            path,
+            git::BootstrapGitError {
+                step: git::BootstrapGitStep::Commit,
+                detail: "Author identity unknown".into(),
+            },
+        )
+        .to_string();
+        assert!(identity.contains("because Git identity is not configured"));
+        assert!(identity.contains("git config user.name <name>"));
+        assert!(identity.contains("git config user.email <email>"));
+        assert!(identity.contains("From inside the generated repository"));
+
+        let generic = bootstrap_git_error(
+            path,
+            git::BootstrapGitError {
+                step: git::BootstrapGitStep::Commit,
+                detail: "gpg failed to sign the data".into(),
+            },
+        )
+        .to_string();
+        assert!(generic.contains("Fix the Git error"));
+        assert!(generic.contains("gpg failed to sign the data"));
+        assert!(!generic.contains("user.name"));
+        assert!(!generic.contains("user.email"));
     }
 }
