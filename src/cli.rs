@@ -18,8 +18,14 @@ pub struct Cli {
 pub enum Commands {
     /// Create a new local Skilldeck catalog scaffold.
     Bootstrap(BootstrapArgs),
-    /// Configure the global per-user catalog repository.
+    /// Configure the initial global per-user registry.
     Init(InitArgs),
+    /// Manage configured package registries.
+    Registry(RegistryArgs),
+    /// Inspect Skilldeck configuration.
+    Config(ConfigArgs),
+    /// Maintain and validate a local catalog working tree.
+    Catalog(CatalogArgs),
     /// Install a catalog skill or direct Git repository.
     Install(InstallArgs),
     /// Install every skill in a catalog group.
@@ -42,12 +48,22 @@ pub enum Commands {
 
 #[derive(Args, Debug, Clone)]
 pub struct CatalogOverrideArgs {
-    /// Catalog Git repository URL/path (overrides config; env SKILLDECK_CATALOG_REPOSITORY).
+    /// Configured registry alias (defaults to the configured default registry; env SKILLDECK_REGISTRY).
+    #[arg(long, global = true, env = "SKILLDECK_REGISTRY")]
+    pub registry: Option<String>,
+    /// Catalog Git repository URL/path (ad-hoc override; env SKILLDECK_CATALOG_REPOSITORY).
     #[arg(long, global = true, env = "SKILLDECK_CATALOG_REPOSITORY")]
     pub catalog_repository: Option<String>,
     /// Catalog Git ref/branch/tag (overrides config; env SKILLDECK_CATALOG_REF).
     #[arg(long, global = true, env = "SKILLDECK_CATALOG_REF")]
     pub catalog_ref: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct LocalCatalogArgs {
+    /// Use a local catalog working tree, including uncommitted changes (defaults to `.`).
+    #[arg(long, num_args = 0..=1, default_missing_value = ".", value_name = "PATH")]
+    pub local: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -69,6 +85,9 @@ pub struct BootstrapArgs {
 pub struct InitArgs {
     #[command(flatten)]
     pub overrides: CatalogOverrideArgs,
+    /// Alias for the initial registry.
+    #[arg(long, default_value = "default")]
+    pub name: String,
     /// Catalog Git repository URL/path for non-interactive setup.
     #[arg(long)]
     pub repository: Option<String>,
@@ -87,6 +106,8 @@ pub struct InitArgs {
 pub struct InstallArgs {
     #[command(flatten)]
     pub overrides: CatalogOverrideArgs,
+    #[command(flatten)]
+    pub local_catalog: LocalCatalogArgs,
     /// Replace an existing destination directory.
     #[arg(long)]
     pub force: bool,
@@ -101,6 +122,8 @@ pub struct InstallArgs {
 pub struct GroupInstallArgs {
     #[command(flatten)]
     pub overrides: CatalogOverrideArgs,
+    #[command(flatten)]
+    pub local_catalog: LocalCatalogArgs,
     #[arg(long)]
     pub force: bool,
     #[arg(long)]
@@ -147,16 +170,177 @@ pub struct RemoveGroupArgs {
 pub struct DoctorArgs {
     #[command(flatten)]
     pub overrides: CatalogOverrideArgs,
+    #[command(flatten)]
+    pub local_catalog: LocalCatalogArgs,
     /// Resolve all external Git/Markdown sources too.
     #[arg(long)]
     pub deep: bool,
+    /// Fail when SKILL.md frontmatter is missing or malformed.
+    #[arg(long)]
+    pub strict: bool,
 }
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
     #[command(flatten)]
     pub overrides: CatalogOverrideArgs,
+    #[command(flatten)]
+    pub local_catalog: LocalCatalogArgs,
+    /// List every configured registry, including built-in skills.
+    #[arg(long, conflicts_with_all = ["registry_name", "builtins"])]
+    pub all: bool,
+    /// List only skills bundled with the Skilldeck binary.
+    #[arg(long, conflicts_with_all = ["registry_name", "all"])]
+    pub builtins: bool,
+    /// Registry alias to list (the default registry when omitted).
+    pub registry_name: Option<String>,
     /// Print stable machine-readable JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RegistryArgs {
+    #[command(subcommand)]
+    pub command: RegistryCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RegistryCommands {
+    /// Add and validate a registry.
+    Add(RegistryAddArgs),
+    /// List configured registries.
+    List(RegistryListArgs),
+    /// Select the registry used by unqualified package names.
+    Default(RegistryDefaultArgs),
+    /// Rename a local registry alias.
+    Rename(RegistryRenameArgs),
+    /// Change a registry repository or ref after validating it.
+    Update(RegistryUpdateArgs),
+    /// Remove a registry.
+    Remove(RegistryRemoveArgs),
+    /// Validate one or every configured registry.
+    Doctor(RegistryDoctorArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct RegistryAddArgs {
+    pub name: String,
+    pub repository: String,
+    #[arg(long, default_value = "master")]
+    pub reference: String,
+    /// Name to give a legacy single registry while migrating.
+    #[arg(long)]
+    pub existing_as: Option<String>,
+    /// Make the newly added registry the default.
+    #[arg(long)]
+    pub default: bool,
+    /// Do not prompt during legacy migration.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RegistryListArgs {
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct RegistryDefaultArgs {
+    pub name: String,
+}
+
+#[derive(Args, Debug)]
+pub struct RegistryRenameArgs {
+    pub old: String,
+    pub new: String,
+}
+
+#[derive(Args, Debug)]
+pub struct RegistryUpdateArgs {
+    pub name: String,
+    #[arg(long)]
+    pub repository: Option<String>,
+    #[arg(long = "reference")]
+    pub reference: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct RegistryRemoveArgs {
+    pub name: String,
+    /// Remove without prompting.
+    #[arg(long)]
+    pub yes: bool,
+    /// Select another default when removing the current default.
+    #[arg(long)]
+    pub new_default: Option<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct RegistryDoctorArgs {
+    pub name: Option<String>,
+    #[arg(long, conflicts_with = "name")]
+    pub all: bool,
+    #[arg(long)]
+    pub deep: bool,
+    /// Fail when SKILL.md frontmatter is missing or malformed.
+    #[arg(long)]
+    pub strict: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommands {
+    /// Print the active global configuration path.
+    Path,
+}
+
+#[derive(Args, Debug)]
+pub struct CatalogArgs {
+    #[command(subcommand)]
+    pub command: CatalogCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CatalogCommands {
+    /// Validate a local catalog working tree without cloning it.
+    Check(CatalogCheckArgs),
+    /// Add and validate an external package in a local catalog.
+    Add(CatalogAddArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct CatalogCheckArgs {
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+    /// Resolve external Git and Markdown sources too.
+    #[arg(long)]
+    pub deep: bool,
+    /// Fail when SKILL.md frontmatter is missing or malformed.
+    #[arg(long)]
+    pub strict: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct CatalogAddArgs {
+    pub name: String,
+    /// Git repository or direct Markdown URL.
+    #[arg(long)]
+    pub source: String,
+    #[arg(long)]
+    pub subdirectory: Option<String>,
+    #[arg(long = "reference")]
+    pub reference: Option<String>,
+    /// Local catalog working tree.
+    #[arg(long, default_value = ".")]
+    pub path: PathBuf,
+    /// Skip resolving the remote source before adding it.
+    #[arg(long)]
+    pub no_check: bool,
 }

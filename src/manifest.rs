@@ -15,10 +15,18 @@ pub struct Manifest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Provenance {
+    BuiltIn {
+        name: String,
+        skilldeck_version: String,
+    },
     Catalog {
         name: String,
         catalog_repository: String,
         catalog_ref: String,
+    },
+    LocalCatalog {
+        name: String,
+        path: String,
     },
     DirectGit {
         repository: String,
@@ -64,11 +72,29 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         record(
             tmp.path(),
+            "builtin",
+            Provenance::BuiltIn {
+                name: "skilldeck".into(),
+                skilldeck_version: "0.2.0".into(),
+            },
+        )
+        .unwrap();
+        record(
+            tmp.path(),
             "a",
             Provenance::Catalog {
                 name: "alpha".into(),
                 catalog_repository: "repo".into(),
                 catalog_ref: "main".into(),
+            },
+        )
+        .unwrap();
+        record(
+            tmp.path(),
+            "local",
+            Provenance::LocalCatalog {
+                name: "local-skill".into(),
+                path: "/tmp/catalog".into(),
             },
         )
         .unwrap();
@@ -83,8 +109,16 @@ mod tests {
         .unwrap();
         let loaded = load(tmp.path()).unwrap();
         assert!(matches!(
+            loaded.skills.get("builtin"),
+            Some(Provenance::BuiltIn { .. })
+        ));
+        assert!(matches!(
             loaded.skills.get("a"),
             Some(Provenance::Catalog { .. })
+        ));
+        assert!(matches!(
+            loaded.skills.get("local"),
+            Some(Provenance::LocalCatalog { .. })
         ));
         assert!(matches!(
             loaded.skills.get("b"),

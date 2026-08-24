@@ -9,6 +9,7 @@ use serde::Serialize;
 use tempfile::TempDir;
 
 use crate::{
+    builtins,
     catalog::{self, Catalog},
     cli::*,
     config::{self, Config, DEFAULT_REF},
@@ -29,6 +30,7 @@ pub fn init(args: InitArgs) -> Result<()> {
         });
     let repo =
         repo.ok_or_else(|| anyhow!("--repository is required with --yes/non-interactive init"))?;
+    let repo = config::normalize_repository(&repo)?;
     let reference = args
         .reference
         .or(args.overrides.catalog_ref)
@@ -40,6 +42,7 @@ pub fn init(args: InitArgs) -> Result<()> {
             }
         })
         .unwrap_or_else(|| DEFAULT_REF.into());
+    config::validate_registry_name(&args.name)?;
     let cfg = Config {
         catalog_repository: repo,
         catalog_ref: reference,
@@ -60,8 +63,23 @@ pub fn init(args: InitArgs) -> Result<()> {
             path.display()
         ));
     }
-    let path = config::save(&cfg)?;
-    println!("Configured skilldeck catalog at {}", path.display());
+    let mut registries = std::collections::BTreeMap::new();
+    registries.insert(
+        args.name.clone(),
+        config::Registry {
+            repository: cfg.catalog_repository.clone(),
+            reference: cfg.catalog_ref.clone(),
+        },
+    );
+    let path = config::save_registries(&config::RegistrySet {
+        default_registry: args.name.clone(),
+        registries,
+    })?;
+    println!(
+        "Configured skilldeck registry `{}` at {}",
+        args.name,
+        path.display()
+    );
     println!("repository = {}", cfg.catalog_repository);
     println!("ref = {}", cfg.catalog_ref);
     println!(
@@ -71,6 +89,344 @@ pub fn init(args: InitArgs) -> Result<()> {
         summary.first_party_count,
         summary.external_count
     );
+    Ok(())
+}
+
+pub fn registry(args: RegistryArgs) -> Result<()> {
+    match args.command {
+        RegistryCommands::Add(args) => registry_add(args),
+        RegistryCommands::List(args) => registry_list(args),
+        RegistryCommands::Default(args) => registry_default(args),
+        RegistryCommands::Rename(args) => registry_rename(args),
+        RegistryCommands::Update(args) => registry_update(args),
+        RegistryCommands::Remove(args) => registry_remove(args),
+        RegistryCommands::Doctor(args) => registry_doctor(args),
+    }
+}
+
+pub fn config_command(args: ConfigArgs) -> Result<()> {
+    match args.command {
+        ConfigCommands::Path => {
+            println!("{}", config::config_path()?.display());
+            Ok(())
+        }
+    }
+}
+
+pub fn catalog_command(args: CatalogArgs) -> Result<()> {
+    match args.command {
+        CatalogCommands::Check(args) => catalog_check(args),
+        CatalogCommands::Add(args) => catalog_add(args),
+    }
+}
+
+fn catalog_check(args: CatalogCheckArgs) -> Result<()> {
+    let root = fs::canonicalize(&args.path)
+        .with_context(|| format!("opening local catalog {}", args.path.display()))?;
+    let catalog = Catalog::open_path(root)?;
+    let summary = catalog.validate()?;
+    println!("Catalog structure: ok");
+    println!(
+        "Found {} skills and {} groups. ({} first-party, {} external)",
+        summary.total_skill_count,
+        summary.group_count,
+        summary.first_party_count,
+        summary.external_count
+    );
+    validate_catalog_metadata(&catalog, args.strict)?;
+    if args.deep {
+        deep_validate(&catalog, args.strict)?;
+    }
+    println!("Catalog check complete: ok");
+    Ok(())
+}
+
+fn catalog_add(args: CatalogAddArgs) -> Result<()> {
+    catalog::validate_name(&args.name, "skill")?;
+    if args.source.trim().is_empty() {
+        return Err(anyhow!("external skill source cannot be empty"));
+    }
+    if let Some(path) = args.subdirectory.as_deref() {
+        catalog::safe_relative_path(path)?;
+    }
+    if fsops::is_markdown_url(&args.source)
+        && (args.subdirectory.is_some() || args.reference.is_some())
+    {
+        return Err(anyhow!(
+            "direct Markdown sources cannot use --subdirectory or --reference"
+        ));
+    }
+    let root = fs::canonicalize(&args.path)
+        .with_context(|| format!("opening local catalog {}", args.path.display()))?;
+    let existing = Catalog::open_path(root.clone())?;
+    if existing
+        .skill_names()
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(&args.name))
+    {
+        return Err(anyhow!(
+            "skill name already exists in catalog (case-insensitive): {}",
+            args.name
+        ));
+    }
+    let external = catalog::ExternalSkill {
+        source: args.source,
+        subdirectory: args.subdirectory,
+        reference: args.reference,
+    };
+    if !args.no_check {
+        validate_external_package(&args.name, &external, true)?;
+    }
+
+    let path = root.join("external-skills.toml");
+    let text = if path.exists() {
+        fs::read_to_string(&path)?
+    } else {
+        String::new()
+    };
+    let mut document = text
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+    if !document.contains_key("skills") {
+        document["skills"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let mut entry = toml_edit::Table::new();
+    entry["source"] = toml_edit::value(external.source.clone());
+    if let Some(subdirectory) = &external.subdirectory {
+        entry["subdirectory"] = toml_edit::value(subdirectory.clone());
+    }
+    if let Some(reference) = &external.reference {
+        entry["ref"] = toml_edit::value(reference.clone());
+    }
+    document["skills"][&args.name] = toml_edit::Item::Table(entry);
+
+    let original = text;
+    fs::write(&path, document.to_string())?;
+    let validation = Catalog::open_path(root).and_then(|catalog| catalog.validate());
+    if let Err(error) = validation {
+        fs::write(&path, original)
+            .with_context(|| format!("restoring {} after validation failure", path.display()))?;
+        return Err(error.context("catalog add rolled back because validation failed"));
+    }
+    println!("Added external skill `{}` to {}", args.name, path.display());
+    Ok(())
+}
+
+fn registry_add(args: RegistryAddArgs) -> Result<()> {
+    config::validate_registry_name(&args.name)?;
+    let repository = config::normalize_repository(&args.repository)?;
+    let cfg = Config {
+        catalog_repository: repository.clone(),
+        catalog_ref: args.reference.clone(),
+    };
+    let summary = Catalog::clone_from_config(&cfg)?.validate()?;
+
+    let loaded = config::load_registries()?;
+    let adding_first = loaded.is_none();
+    let mut set = match loaded {
+        Some(mut loaded) => {
+            if loaded.legacy {
+                let existing_name = match args.existing_as {
+                    Some(name) => name,
+                    None if args.yes => config::LEGACY_REGISTRY_NAME.into(),
+                    None => prompt_default(
+                        "Namespace for the existing registry",
+                        config::LEGACY_REGISTRY_NAME,
+                    )
+                    .unwrap_or_else(|| config::LEGACY_REGISTRY_NAME.into()),
+                };
+                config::validate_registry_name(&existing_name)?;
+                if existing_name != config::LEGACY_REGISTRY_NAME {
+                    let existing = loaded
+                        .set
+                        .registries
+                        .remove(config::LEGACY_REGISTRY_NAME)
+                        .expect("legacy registry exists");
+                    loaded
+                        .set
+                        .registries
+                        .insert(existing_name.clone(), existing);
+                    loaded.set.default_registry = existing_name;
+                }
+            }
+            loaded.set
+        }
+        None => config::RegistrySet {
+            default_registry: args.name.clone(),
+            registries: std::collections::BTreeMap::new(),
+        },
+    };
+    if set.registries.contains_key(&args.name) {
+        return Err(anyhow!("registry already exists: {}", args.name));
+    }
+    set.registries.insert(
+        args.name.clone(),
+        config::Registry {
+            repository,
+            reference: args.reference,
+        },
+    );
+    let make_default = args.default
+        || adding_first
+        || (!args.yes
+            && confirm(&format!(
+                "Make `{}` the default registry instead?",
+                args.name
+            ))?);
+    if make_default {
+        set.default_registry = args.name.clone();
+    }
+    let path = config::save_registries(&set)?;
+    println!("Added registry `{}` in {}", args.name, path.display());
+    println!(
+        "Found {} skills and {} groups. ({} first-party, {} external)",
+        summary.total_skill_count,
+        summary.group_count,
+        summary.first_party_count,
+        summary.external_count
+    );
+    println!("Default registry: {}", set.default_registry);
+    Ok(())
+}
+
+fn registry_list(args: RegistryListArgs) -> Result<()> {
+    let loaded = config::load_registries()?
+        .ok_or_else(|| anyhow!("no registries configured; run `skilldeck init`"))?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&loaded.set)?);
+    } else {
+        for (name, registry) in loaded.set.registries {
+            let marker = if name == loaded.set.default_registry {
+                "*"
+            } else {
+                " "
+            };
+            println!(
+                "{marker} {name}: {} @ {}",
+                registry.repository, registry.reference
+            );
+        }
+    }
+    Ok(())
+}
+
+fn registry_default(args: RegistryDefaultArgs) -> Result<()> {
+    config::validate_registry_name(&args.name)?;
+    let mut loaded = config::load_registries()?
+        .ok_or_else(|| anyhow!("no registries configured; run `skilldeck init`"))?;
+    if !loaded.set.registries.contains_key(&args.name) {
+        return Err(anyhow!("registry not found: {}", args.name));
+    }
+    loaded.set.default_registry = args.name.clone();
+    config::save_registries(&loaded.set)?;
+    println!("Default registry: {}", args.name);
+    Ok(())
+}
+
+fn registry_rename(args: RegistryRenameArgs) -> Result<()> {
+    config::validate_registry_name(&args.old)?;
+    config::validate_registry_name(&args.new)?;
+    let mut loaded = config::load_registries()?
+        .ok_or_else(|| anyhow!("no registries configured; run `skilldeck init`"))?;
+    if loaded.set.registries.contains_key(&args.new) {
+        return Err(anyhow!("registry already exists: {}", args.new));
+    }
+    let registry = loaded
+        .set
+        .registries
+        .remove(&args.old)
+        .ok_or_else(|| anyhow!("registry not found: {}", args.old))?;
+    loaded.set.registries.insert(args.new.clone(), registry);
+    if loaded.set.default_registry == args.old {
+        loaded.set.default_registry = args.new.clone();
+    }
+    config::save_registries(&loaded.set)?;
+    println!("Renamed registry `{}` to `{}`", args.old, args.new);
+    Ok(())
+}
+
+fn registry_update(args: RegistryUpdateArgs) -> Result<()> {
+    if args.repository.is_none() && args.reference.is_none() {
+        return Err(anyhow!(
+            "registry update requires --repository or --reference"
+        ));
+    }
+    let mut loaded = config::load_registries()?
+        .ok_or_else(|| anyhow!("no registries configured; run `skilldeck init`"))?;
+    let registry = loaded
+        .set
+        .registries
+        .get_mut(&args.name)
+        .ok_or_else(|| anyhow!("registry not found: {}", args.name))?;
+    if let Some(repository) = args.repository {
+        registry.repository = config::normalize_repository(&repository)?;
+    }
+    if let Some(reference) = args.reference {
+        registry.reference = reference;
+    }
+    Catalog::clone_from_config(&registry.as_config())?.validate()?;
+    config::save_registries(&loaded.set)?;
+    println!("Updated registry `{}`", args.name);
+    Ok(())
+}
+
+fn registry_remove(args: RegistryRemoveArgs) -> Result<()> {
+    let mut loaded = config::load_registries()?
+        .ok_or_else(|| anyhow!("no registries configured; run `skilldeck init`"))?;
+    if !loaded.set.registries.contains_key(&args.name) {
+        return Err(anyhow!("registry not found: {}", args.name));
+    }
+    if loaded.set.registries.len() == 1 {
+        return Err(anyhow!("cannot remove the only configured registry"));
+    }
+    if loaded.set.default_registry == args.name {
+        let replacement = args.new_default.ok_or_else(|| {
+            anyhow!("cannot remove the default registry without --new-default <name>")
+        })?;
+        if replacement == args.name || !loaded.set.registries.contains_key(&replacement) {
+            return Err(anyhow!(
+                "replacement default registry not found: {replacement}"
+            ));
+        }
+        loaded.set.default_registry = replacement;
+    }
+    if !args.yes && !confirm(&format!("Remove registry `{}`?", args.name))? {
+        return Err(anyhow!("registry removal cancelled"));
+    }
+    loaded.set.registries.remove(&args.name);
+    config::save_registries(&loaded.set)?;
+    println!("Removed registry `{}`", args.name);
+    Ok(())
+}
+
+fn registry_doctor(args: RegistryDoctorArgs) -> Result<()> {
+    let loaded = config::load_registries()?
+        .ok_or_else(|| anyhow!("no registries configured; run `skilldeck init`"))?;
+    let names: Vec<String> = if args.all {
+        loaded.set.registries.keys().cloned().collect()
+    } else {
+        vec![args
+            .name
+            .unwrap_or_else(|| loaded.set.default_registry.clone())]
+    };
+    for name in names {
+        let registry = loaded
+            .set
+            .registries
+            .get(&name)
+            .ok_or_else(|| anyhow!("registry not found: {name}"))?;
+        let catalog = Catalog::clone_from_config(&registry.as_config())?;
+        let summary = catalog.validate()?;
+        println!(
+            "Registry {name}: ok ({} skills, {} groups)",
+            summary.total_skill_count, summary.group_count
+        );
+        validate_catalog_metadata(&catalog, args.strict)?;
+        if args.deep {
+            deep_validate(&catalog, args.strict)?;
+        }
+    }
+    println!("Registry doctor complete: ok");
     Ok(())
 }
 
@@ -348,7 +704,7 @@ This catalog was generated by `skilldeck bootstrap --quickstart`.
 ## What's included
 
 - `skills/hello-world/SKILL.md` — a first-party example skill you can edit or replace.
-- `external-skills.toml` — an external `skilldeck` skill pinned to Skilldeck v0.1.4.
+- `external-skills.toml` — an external `skilldeck` skill pinned to Skilldeck v0.2.0.
 - `skill-groups.toml` — a `quickstart` group containing both skills.
 
 ## Try it locally
@@ -398,7 +754,7 @@ Do not commit, push, delete files, or change global configuration unless the use
 const QUICKSTART_EXTERNAL_SKILLS: &str = r#"[skills.skilldeck]
 source = "https://github.com/Cause-of-a-Kind/skilldeck.git"
 subdirectory = "examples/skilldeck-skill"
-ref = "v0.1.4"
+ref = "v0.2.0"
 "#;
 
 const QUICKSTART_SKILL_GROUPS: &str = r#"[groups.quickstart]
@@ -457,6 +813,7 @@ pub fn install(args: InstallArgs, require_existing: bool) -> Result<()> {
         args.force,
         require_existing,
         &args.overrides,
+        args.local_catalog.local.as_deref(),
         args.yes,
     )
     .map(|name| {
@@ -473,20 +830,34 @@ pub fn install(args: InstallArgs, require_existing: bool) -> Result<()> {
     })
 }
 
+fn open_catalog(cfg: &Config, local: Option<&Path>) -> Result<(Catalog, Option<PathBuf>)> {
+    if let Some(local) = local {
+        let path = fs::canonicalize(local)
+            .with_context(|| format!("opening local catalog {}", local.display()))?;
+        Ok((Catalog::open_path(path.clone())?, Some(path)))
+    } else {
+        Ok((Catalog::clone_from_config(cfg)?, None))
+    }
+}
+
 pub fn install_group(args: GroupInstallArgs) -> Result<()> {
-    catalog::validate_name(&args.group, "group")?;
-    let cfg = config::resolve(&args.overrides)?;
-    let catalog = Catalog::clone_from_config(&cfg)?;
+    let (group, overrides) = qualified_selector(&args.group, &args.overrides, "group")?;
+    catalog::validate_name(&group, "group")?;
+    let cfg = config::resolve(&overrides)?;
+    let (catalog, local_path) = open_catalog(&cfg, args.local_catalog.local.as_deref())?;
+    if local_path.is_some() {
+        catalog.validate()?;
+    }
     let skills = catalog
-        .group(&args.group)
-        .ok_or_else(|| catalog::not_found("group", &args.group, &catalog.group_names()))?
+        .group(&group)
+        .ok_or_else(|| catalog::not_found("group", &group, &catalog.group_names()))?
         .clone();
     for skill in &skills {
         catalog::validate_name(skill, "skill")?;
         if !catalog.has_skill(skill) {
             return Err(anyhow!(
                 "skill group {} references missing skill: {}",
-                args.group,
+                group,
                 skill
             ));
         }
@@ -535,7 +906,11 @@ pub fn install_group(args: GroupInstallArgs) -> Result<()> {
 
     for (prepared, existed, overwrite) in prepared {
         let dest = fsops::destination(&args.install_directory, &prepared.name);
-        install_prepared_catalog(&prepared, &args.install_directory, overwrite, false, &cfg)?;
+        let source = match local_path.as_deref() {
+            Some(path) => CatalogInstallSource::Local(path),
+            None => CatalogInstallSource::Remote(&cfg),
+        };
+        install_prepared_catalog(&prepared, &args.install_directory, overwrite, false, source)?;
         if existed {
             overwritten += 1;
             println!("Overwritten {} at {}", prepared.name, dest.display());
@@ -555,10 +930,11 @@ pub fn update(args: UpdateArgs) -> Result<()> {
     match (args.name_or_git_url, args.install_directory) {
         (Some(root), None) => update_all(PathBuf::from(root), &args.overrides),
         (Some(name), Some(root)) => {
-            install_named_or_git(&name, &root, true, true, &args.overrides, false)?;
-            println!("Updated {} at {}", dir_name_for(&name), root.join(dir_name_for(&name)).display());
+            let installed =
+                install_named_or_git(&name, &root, true, true, &args.overrides, None, false)?;
+            println!("Updated {} at {}", installed, root.join(&installed).display());
             Ok(())
-        },
+        }
         _ => Err(anyhow!("usage: skilldeck update <install-directory> OR skilldeck update <name-or-git-url> <install-directory>")),
     }
 }
@@ -579,7 +955,7 @@ pub fn remove(args: RemoveArgs) -> Result<()> {
 
 pub fn doctor(args: DoctorArgs) -> Result<()> {
     let cfg = config::resolve(&args.overrides)?;
-    let catalog = Catalog::clone_from_config(&cfg)?;
+    let (catalog, _) = open_catalog(&cfg, args.local_catalog.local.as_deref())?;
     let summary = catalog.validate()?;
     println!("Catalog structure: ok");
     println!(
@@ -589,8 +965,9 @@ pub fn doctor(args: DoctorArgs) -> Result<()> {
         summary.first_party_count,
         summary.external_count
     );
+    validate_catalog_metadata(&catalog, args.strict)?;
     if args.deep {
-        deep_validate(&catalog)?;
+        deep_validate(&catalog, args.strict)?;
     }
     println!("Doctor complete: ok");
     Ok(())
@@ -598,8 +975,12 @@ pub fn doctor(args: DoctorArgs) -> Result<()> {
 
 #[derive(Serialize)]
 struct ListOutput {
-    repository: String,
-    reference: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    registry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repository: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference: Option<String>,
     counts: crate::catalog::CatalogSummary,
     skills: Vec<crate::catalog::SkillEntry>,
     groups: Vec<ListGroup>,
@@ -611,12 +992,15 @@ struct ListGroup {
     members: Vec<String>,
 }
 
-pub fn list(args: ListArgs) -> Result<()> {
-    let cfg = config::resolve(&args.overrides)?;
-    let catalog = Catalog::clone_from_config(&cfg)?;
+fn catalog_list_output(
+    registry: Option<String>,
+    repository: String,
+    reference: String,
+    catalog: &Catalog,
+) -> Result<ListOutput> {
     let counts = catalog.validate()?;
     let skills = catalog.skills();
-    let groups: Vec<_> = catalog
+    let groups = catalog
         .groups()
         .iter()
         .map(|(name, members)| ListGroup {
@@ -624,38 +1008,248 @@ pub fn list(args: ListArgs) -> Result<()> {
             members: members.clone(),
         })
         .collect();
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&ListOutput {
-                repository: cfg.catalog_repository,
-                reference: cfg.catalog_ref,
-                counts,
-                skills,
-                groups
-            })?
-        );
+    Ok(ListOutput {
+        registry,
+        repository: Some(repository),
+        reference: Some(reference),
+        counts,
+        skills,
+        groups,
+    })
+}
+
+fn list_output(registry: Option<String>, cfg: Config) -> Result<ListOutput> {
+    let catalog = Catalog::clone_from_config(&cfg)?;
+    catalog_list_output(registry, cfg.catalog_repository, cfg.catalog_ref, &catalog)
+}
+
+fn builtin_list_output() -> ListOutput {
+    let skills = builtins::names()
+        .into_iter()
+        .map(|name| crate::catalog::SkillEntry {
+            name,
+            source_type: "built-in".into(),
+        })
+        .collect::<Vec<_>>();
+    ListOutput {
+        registry: Some(builtins::REGISTRY_NAME.into()),
+        repository: None,
+        reference: Some(env!("CARGO_PKG_VERSION").into()),
+        counts: crate::catalog::CatalogSummary {
+            built_in_count: skills.len(),
+            first_party_count: 0,
+            external_count: 0,
+            group_count: 0,
+            total_skill_count: skills.len(),
+        },
+        skills,
+        groups: Vec::new(),
+    }
+}
+
+fn print_list_output(output: &ListOutput, qualified: bool) {
+    if let Some(registry) = &output.registry {
+        match (&output.repository, &output.reference) {
+            (Some(repository), Some(reference)) => {
+                println!("Registry {registry}: {repository} @ {reference}")
+            }
+            (None, Some(version)) => {
+                println!("Registry {registry}: bundled with Skilldeck {version}")
+            }
+            _ => println!("Registry {registry}"),
+        }
+    }
+    if output.counts.built_in_count > 0 {
+        let noun = if output.counts.built_in_count == 1 {
+            "skill"
+        } else {
+            "skills"
+        };
+        println!("Found {} built-in {noun}.", output.counts.built_in_count);
     } else {
         println!(
             "Found {} skills and {} groups. ({} first-party, {} external)",
-            counts.total_skill_count,
-            counts.group_count,
-            counts.first_party_count,
-            counts.external_count
+            output.counts.total_skill_count,
+            output.counts.group_count,
+            output.counts.first_party_count,
+            output.counts.external_count
         );
-        println!("Skills:");
-        for skill in skills {
-            println!("  [{}] {}", skill.source_type, skill.name);
-        }
+    }
+    println!("Skills:");
+    for skill in &output.skills {
+        let name = if qualified {
+            format!(
+                "{}:{}",
+                output.registry.as_deref().unwrap_or("default"),
+                skill.name
+            )
+        } else {
+            skill.name.clone()
+        };
+        println!("  [{}] {name}", skill.source_type);
+    }
+    if !output.groups.is_empty() {
         println!("Groups:");
-        for group in groups {
-            println!("  {}: {}", group.name, group.members.join(" "));
+    }
+    for group in &output.groups {
+        let name = if qualified {
+            format!(
+                "{}:{}",
+                output.registry.as_deref().unwrap_or("default"),
+                group.name
+            )
+        } else {
+            group.name.clone()
+        };
+        println!("  {name}: {}", group.members.join(" "));
+    }
+}
+
+pub fn list(args: ListArgs) -> Result<()> {
+    if args.builtins {
+        if args.local_catalog.local.is_some()
+            || args.overrides.catalog_repository.is_some()
+            || args.overrides.registry.is_some()
+        {
+            return Err(anyhow!(
+                "--builtins cannot be combined with --local, registry, or catalog overrides"
+            ));
+        }
+        let output = builtin_list_output();
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            print_list_output(&output, true);
+        }
+        return Ok(());
+    }
+    if args.all {
+        if args.local_catalog.local.is_some()
+            || args.overrides.catalog_repository.is_some()
+            || args.overrides.registry.is_some()
+        {
+            return Err(anyhow!(
+                "--all cannot be combined with --local, registry, or catalog overrides"
+            ));
+        }
+        let mut outputs = vec![builtin_list_output()];
+        if let Some(loaded) = config::load_registries()? {
+            for (name, registry) in &loaded.set.registries {
+                outputs.push(list_output(Some(name.clone()), registry.as_config())?);
+            }
+        }
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&outputs)?);
+        } else {
+            for output in outputs {
+                print_list_output(&output, true);
+            }
+        }
+        return Ok(());
+    }
+    let mut overrides = args.overrides.clone();
+    if let Some(name) = args.registry_name {
+        if let Some(selected) = &overrides.registry {
+            if selected != &name {
+                return Err(anyhow!(
+                    "registry argument `{name}` conflicts with --registry `{selected}`"
+                ));
+            }
+        }
+        overrides.registry = Some(name);
+    }
+    if overrides.catalog_repository.is_none() && overrides.registry.is_none() {
+        if let Some(loaded) = config::load_registries()? {
+            overrides.registry = Some(loaded.set.default_registry);
+        }
+    }
+    let cfg = config::resolve(&overrides)?;
+    let output = if let Some(local) = args.local_catalog.local.as_deref() {
+        let (catalog, path) = open_catalog(&cfg, Some(local))?;
+        let path = path.expect("local catalog path is present");
+        catalog_list_output(
+            overrides.registry,
+            path.display().to_string(),
+            "working-tree".into(),
+            &catalog,
+        )?
+    } else {
+        list_output(overrides.registry, cfg)?
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_list_output(&output, false);
+    }
+    Ok(())
+}
+
+fn validate_catalog_metadata(catalog: &Catalog, strict: bool) -> Result<()> {
+    let issues = catalog.metadata_issues()?;
+    for issue in &issues {
+        println!("Warning: {issue}");
+    }
+    if strict && !issues.is_empty() {
+        Err(anyhow!(
+            "skill metadata validation failed:\n- {}",
+            issues.join("\n- ")
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_external_package(
+    name: &str,
+    ext: &catalog::ExternalSkill,
+    validate_metadata: bool,
+) -> Result<()> {
+    if fsops::is_markdown_url(&ext.source) {
+        let body = reqwest::blocking::get(&ext.source)?
+            .error_for_status()?
+            .text()?;
+        if body.trim().is_empty() {
+            return Err(anyhow!("markdown content is empty"));
+        }
+        if validate_metadata {
+            let issues = crate::skill::validate_text(&body, name);
+            if !issues.is_empty() {
+                return Err(anyhow!("invalid SKILL.md:\n- {}", issues.join("\n- ")));
+            }
+        }
+        return Ok(());
+    }
+    let temp = TempDir::new()?;
+    let source_root = temp.path().join("source");
+    git::clone_repository(&ext.source, ext.reference.as_deref(), &source_root)?;
+    let source = match ext
+        .subdirectory
+        .as_deref()
+        .filter(|path| !path.is_empty() && *path != "-")
+    {
+        Some(path) => {
+            catalog::safe_relative_path(path)?;
+            source_root.join(path)
+        }
+        None => source_root,
+    };
+    if !source.is_dir() {
+        return Err(anyhow!("subdirectory not found: {}", source.display()));
+    }
+    let skill_md = source.join("SKILL.md");
+    if !skill_md.is_file() {
+        return Err(anyhow!("resolved source missing SKILL.md"));
+    }
+    if validate_metadata {
+        let issues = crate::skill::validate_file(&skill_md, name)?;
+        if !issues.is_empty() {
+            return Err(anyhow!("invalid SKILL.md:\n- {}", issues.join("\n- ")));
         }
     }
     Ok(())
 }
 
-fn deep_validate(catalog: &Catalog) -> Result<()> {
+fn deep_validate(catalog: &Catalog, strict: bool) -> Result<()> {
     let mut issues = Vec::new();
     for (name, ext) in catalog.externals() {
         print!("External {name}: ");
@@ -664,7 +1258,18 @@ fn deep_validate(catalog: &Catalog) -> Result<()> {
                 .and_then(|r| r.error_for_status())
                 .and_then(|r| r.text())
             {
-                Ok(body) if !body.trim().is_empty() => println!("ok"),
+                Ok(body) if !body.trim().is_empty() => {
+                    let metadata = strict.then(|| crate::skill::validate_text(&body, name));
+                    if let Some(metadata) = metadata.filter(|issues| !issues.is_empty()) {
+                        println!("invalid metadata");
+                        issues.push(format!(
+                            "external {name}: invalid SKILL.md: {}",
+                            metadata.join("; ")
+                        ));
+                    } else {
+                        println!("ok");
+                    }
+                }
                 Ok(_) => {
                     println!("empty markdown");
                     issues.push(format!("external {name}: markdown content is empty"));
@@ -694,6 +1299,17 @@ fn deep_validate(catalog: &Catalog) -> Result<()> {
                 } else if !source.join("SKILL.md").is_file() {
                     println!("missing SKILL.md");
                     issues.push(format!("external {name}: resolved source missing SKILL.md"));
+                } else if strict {
+                    let metadata = crate::skill::validate_file(&source.join("SKILL.md"), name)?;
+                    if metadata.is_empty() {
+                        println!("ok");
+                    } else {
+                        println!("invalid metadata");
+                        issues.push(format!(
+                            "external {name}: invalid SKILL.md: {}",
+                            metadata.join("; ")
+                        ));
+                    }
                 } else {
                     println!("ok");
                 }
@@ -715,12 +1331,13 @@ fn deep_validate(catalog: &Catalog) -> Result<()> {
 }
 
 pub fn remove_group(args: RemoveGroupArgs) -> Result<()> {
-    catalog::validate_name(&args.group, "group")?;
-    let cfg = config::resolve(&args.overrides)?;
+    let (group, overrides) = qualified_selector(&args.group, &args.overrides, "group")?;
+    catalog::validate_name(&group, "group")?;
+    let cfg = config::resolve(&overrides)?;
     let catalog = Catalog::clone_from_config(&cfg)?;
     let skills = catalog
-        .group(&args.group)
-        .ok_or_else(|| catalog::not_found("group", &args.group, &catalog.group_names()))?
+        .group(&group)
+        .ok_or_else(|| catalog::not_found("group", &group, &catalog.group_names()))?
         .clone();
     let mut removed = 0;
     let mut skipped = 0;
@@ -752,7 +1369,7 @@ pub fn remove_group(args: RemoveGroupArgs) -> Result<()> {
     if removed == 0 {
         Err(anyhow!(
             "no installed skills from group {} were removed",
-            args.group
+            group
         ))
     } else {
         Ok(())
@@ -780,15 +1397,55 @@ fn remove_one(name: &str, root: &Path, strict: bool) -> Result<bool> {
     Ok(true)
 }
 
+fn install_builtin(
+    name: &str,
+    root: &Path,
+    force: bool,
+    require_existing: bool,
+    yes: bool,
+) -> Result<String> {
+    catalog::validate_name(name, "built-in skill")?;
+    let (_temp, source) = builtins::materialize(name)?;
+    fsops::ensure_install_root(root, yes)?;
+    install_source(name, &source, root, force, require_existing)?;
+    manifest::record(
+        root,
+        name,
+        Provenance::BuiltIn {
+            name: name.into(),
+            skilldeck_version: env!("CARGO_PKG_VERSION").into(),
+        },
+    )?;
+    Ok(name.into())
+}
+
 fn install_named_or_git(
     requested: &str,
     root: &Path,
     force: bool,
     require_existing: bool,
     overrides: &CatalogOverrideArgs,
+    local_catalog: Option<&Path>,
     yes: bool,
 ) -> Result<String> {
+    if let Some(name) = builtins::selector_name(requested) {
+        if local_catalog.is_some() {
+            return Err(anyhow!("--local can only be used with catalog skills"));
+        }
+        if overrides.catalog_repository.is_some()
+            || overrides.catalog_ref.is_some()
+            || overrides.registry.is_some()
+        {
+            return Err(anyhow!(
+                "built-in skills cannot be combined with registry or catalog overrides"
+            ));
+        }
+        return install_builtin(name, root, force, require_existing, yes);
+    }
     if fsops::is_git_url(requested) {
+        if local_catalog.is_some() {
+            return Err(anyhow!("--local can only be used with catalog skills"));
+        }
         if fsops::is_markdown_url(requested) {
             return Err(anyhow!(
                 "direct Markdown URLs must be installed through a catalog entry"
@@ -811,20 +1468,51 @@ fn install_named_or_git(
         )?;
         Ok(name)
     } else {
-        let cfg = config::resolve(overrides)?;
-        let catalog = Catalog::clone_from_config(&cfg)?;
+        let (name, selected_overrides) = qualified_selector(requested, overrides, "skill")?;
+        let cfg = config::resolve(&selected_overrides)?;
+        let (catalog, local_path) = open_catalog(&cfg, local_catalog)?;
+        if local_path.is_some() {
+            catalog.validate()?;
+        }
         // Resolve the catalog entry before prompting/creating a missing install root.
-        if !catalog.has_skill(requested) {
-            catalog::validate_name(requested, "skill")?;
-            return Err(catalog::not_found(
-                "skill",
-                requested,
-                &catalog.skill_names(),
-            ));
+        if !catalog.has_skill(&name) {
+            catalog::validate_name(&name, "skill")?;
+            return Err(catalog::not_found("skill", &name, &catalog.skill_names()));
         }
         fsops::ensure_install_root(root, yes)?;
-        install_from_catalog(requested, root, force, require_existing, &cfg, &catalog)
+        let source = match local_path.as_deref() {
+            Some(path) => CatalogInstallSource::Local(path),
+            None => CatalogInstallSource::Remote(&cfg),
+        };
+        install_from_catalog(&name, root, force, require_existing, source, &catalog)
     }
+}
+
+fn qualified_selector(
+    value: &str,
+    overrides: &CatalogOverrideArgs,
+    kind: &str,
+) -> Result<(String, CatalogOverrideArgs)> {
+    let Some((registry, name)) = value.split_once(':') else {
+        return Ok((value.to_string(), overrides.clone()));
+    };
+    config::validate_registry_name(registry)?;
+    catalog::validate_name(name, kind)?;
+    if let Some(selected) = &overrides.registry {
+        if selected != registry {
+            return Err(anyhow!(
+                "qualified {kind} selects registry `{registry}`, but --registry selects `{selected}`"
+            ));
+        }
+    }
+    if overrides.catalog_repository.is_some() {
+        return Err(anyhow!(
+            "qualified {kind} names cannot be combined with --catalog-repository"
+        ));
+    }
+    let mut selected = overrides.clone();
+    selected.registry = Some(registry.to_string());
+    Ok((name.to_string(), selected))
 }
 
 struct PreparedCatalogSource {
@@ -880,12 +1568,18 @@ fn prepare_catalog_source(name: &str, catalog: &Catalog) -> Result<PreparedCatal
     Err(catalog::not_found("skill", name, &catalog.skill_names()))
 }
 
+#[derive(Clone, Copy)]
+enum CatalogInstallSource<'a> {
+    Remote(&'a Config),
+    Local(&'a Path),
+}
+
 fn install_prepared_catalog(
     prepared: &PreparedCatalogSource,
     root: &Path,
     force: bool,
     require_existing: bool,
-    cfg: &Config,
+    source: CatalogInstallSource<'_>,
 ) -> Result<String> {
     install_source(
         &prepared.name,
@@ -894,15 +1588,18 @@ fn install_prepared_catalog(
         force,
         require_existing,
     )?;
-    manifest::record(
-        root,
-        &prepared.name,
-        Provenance::Catalog {
+    let provenance = match source {
+        CatalogInstallSource::Remote(cfg) => Provenance::Catalog {
             name: prepared.name.clone(),
             catalog_repository: cfg.catalog_repository.clone(),
             catalog_ref: cfg.catalog_ref.clone(),
         },
-    )?;
+        CatalogInstallSource::Local(path) => Provenance::LocalCatalog {
+            name: prepared.name.clone(),
+            path: path.to_string_lossy().into_owned(),
+        },
+    };
+    manifest::record(root, &prepared.name, provenance)?;
     Ok(prepared.name.clone())
 }
 
@@ -911,11 +1608,11 @@ fn install_from_catalog(
     root: &Path,
     force: bool,
     require_existing: bool,
-    cfg: &Config,
+    source: CatalogInstallSource<'_>,
     catalog: &Catalog,
 ) -> Result<String> {
     let prepared = prepare_catalog_source(name, catalog)?;
-    install_prepared_catalog(&prepared, root, force, require_existing, cfg)
+    install_prepared_catalog(&prepared, root, force, require_existing, source)
 }
 
 fn install_source(
@@ -983,6 +1680,32 @@ fn update_all(root: PathBuf, overrides: &CatalogOverrideArgs) -> Result<()> {
             continue;
         }
         match man.skills.get(&name).cloned() {
+            Some(Provenance::BuiltIn {
+                name: builtin_name, ..
+            }) => {
+                install_builtin(&builtin_name, &root, true, true, false)?;
+                updated += 1;
+                println!("Updated {name}: built-in skill {builtin_name}");
+            }
+            Some(Provenance::LocalCatalog {
+                name: cat_name,
+                path,
+            }) => {
+                let local_path = fs::canonicalize(&path)
+                    .with_context(|| format!("opening local catalog {path}"))?;
+                let catalog = Catalog::open_path(local_path.clone())?;
+                catalog.validate()?;
+                install_from_catalog(
+                    &cat_name,
+                    &root,
+                    true,
+                    true,
+                    CatalogInstallSource::Local(&local_path),
+                    &catalog,
+                )?;
+                updated += 1;
+                println!("Updated {name}: local catalog skill {cat_name}");
+            }
             Some(Provenance::Catalog {
                 name: cat_name,
                 catalog_repository,
@@ -993,7 +1716,14 @@ fn update_all(root: PathBuf, overrides: &CatalogOverrideArgs) -> Result<()> {
                     catalog_ref,
                 };
                 let cat2 = Catalog::clone_from_config(&cfg2)?;
-                install_from_catalog(&cat_name, &root, true, true, &cfg2, &cat2)?;
+                install_from_catalog(
+                    &cat_name,
+                    &root,
+                    true,
+                    true,
+                    CatalogInstallSource::Remote(&cfg2),
+                    &cat2,
+                )?;
                 updated += 1;
                 println!("Updated {name}: catalog skill {cat_name}");
             }
@@ -1018,7 +1748,14 @@ fn update_all(root: PathBuf, overrides: &CatalogOverrideArgs) -> Result<()> {
                 }
                 if let Some((cfg, catalog)) = &current_catalog {
                     if catalog.has_skill(&name) {
-                        install_from_catalog(&name, &root, true, true, cfg, catalog)?;
+                        install_from_catalog(
+                            &name,
+                            &root,
+                            true,
+                            true,
+                            CatalogInstallSource::Remote(cfg),
+                            catalog,
+                        )?;
                         updated += 1;
                         println!("Updated {name}: catalog match");
                     } else {

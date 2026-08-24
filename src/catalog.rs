@@ -43,10 +43,16 @@ pub struct SkillEntry {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogSummary {
+    #[serde(skip_serializing_if = "is_zero")]
+    pub built_in_count: usize,
     pub first_party_count: usize,
     pub external_count: usize,
     pub group_count: usize,
     pub total_skill_count: usize,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 pub struct Catalog {
@@ -64,6 +70,10 @@ impl Catalog {
         git::clone_repository(&cfg.catalog_repository, Some(&cfg.catalog_ref), &root)
             .with_context(|| format!("downloading catalog from {}", cfg.catalog_repository))?;
         Self::open(temp, root)
+    }
+
+    pub fn open_path(root: PathBuf) -> Result<Self> {
+        Self::open(TempDir::new()?, root)
     }
 
     pub fn open(temp: TempDir, root: PathBuf) -> Result<Self> {
@@ -131,14 +141,36 @@ impl Catalog {
     }
     pub fn summary(&self) -> CatalogSummary {
         CatalogSummary {
+            built_in_count: 0,
             first_party_count: self.first_party.len(),
             external_count: self.externals.len(),
             group_count: self.groups.len(),
             total_skill_count: self.first_party.len() + self.externals.len(),
         }
     }
+    pub fn metadata_issues(&self) -> Result<Vec<String>> {
+        let mut issues = Vec::new();
+        for (name, path) in &self.first_party {
+            for issue in crate::skill::validate_file(&path.join("SKILL.md"), name)? {
+                issues.push(format!("first-party skill {name}: {issue}"));
+            }
+        }
+        Ok(issues)
+    }
+
     pub fn validate(&self) -> Result<CatalogSummary> {
         let mut issues = Vec::new();
+        let mut portable_names = std::collections::BTreeMap::<String, String>::new();
+        for name in self.skill_names() {
+            let folded = name.to_ascii_lowercase();
+            if let Some(previous) = portable_names.insert(folded, name.clone()) {
+                if previous != name {
+                    issues.push(format!(
+                        "case-insensitive skill name collision: {previous} and {name}"
+                    ));
+                }
+            }
+        }
         for name in self.first_party.keys() {
             if let Err(e) = validate_name(name, "skill") {
                 issues.push(e.to_string());
@@ -156,6 +188,13 @@ impl Catalog {
             }
             if ext.source.trim().is_empty() {
                 issues.push(format!("external skill {name} has empty source"));
+            }
+            if crate::fsops::is_markdown_url(&ext.source)
+                && (ext.subdirectory.is_some() || ext.reference.is_some())
+            {
+                issues.push(format!(
+                    "external skill {name}: direct Markdown sources cannot specify subdirectory or ref"
+                ));
             }
             if let Some(path) = ext
                 .subdirectory
@@ -371,6 +410,23 @@ mod tests {
         let catalog = Catalog::open(tmp, root).unwrap();
         let err = catalog.validate().unwrap_err().to_string();
         assert!(err.contains("invalid skill name: bad name"));
+    }
+
+    #[test]
+    fn case_insensitive_skill_collisions_are_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("catalog");
+        fs::create_dir_all(root.join("skills/Deploy")).unwrap();
+        fs::write(root.join("skills/Deploy/SKILL.md"), "Deploy").unwrap();
+        fs::write(
+            root.join("external-skills.toml"),
+            "[skills.deploy]\nsource = 'https://example.com/deploy.git'\n",
+        )
+        .unwrap();
+        fs::write(root.join("skill-groups.toml"), "").unwrap();
+        let catalog = Catalog::open(tmp, root).unwrap();
+        let error = catalog.validate().unwrap_err().to_string();
+        assert!(error.contains("case-insensitive skill name collision"));
     }
 
     #[test]

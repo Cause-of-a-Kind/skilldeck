@@ -1,3 +1,4 @@
+mod builtins;
 mod catalog;
 mod cli;
 mod config;
@@ -5,6 +6,7 @@ mod fsops;
 mod git;
 mod manifest;
 mod ops;
+mod skill;
 mod upgrade;
 
 use anyhow::Result;
@@ -24,6 +26,9 @@ fn run() -> Result<()> {
     let result = match cli.command {
         Commands::Bootstrap(args) => ops::bootstrap(args),
         Commands::Init(args) => ops::init(args),
+        Commands::Registry(args) => ops::registry(args),
+        Commands::Config(args) => ops::config_command(args),
+        Commands::Catalog(args) => ops::catalog_command(args),
         Commands::Install(args) => ops::install(args, false),
         Commands::InstallGroup(args) => ops::install_group(args),
         Commands::Update(args) => ops::update(args),
@@ -50,6 +55,9 @@ fn should_notify_after(command: &Commands) -> bool {
     match command {
         Commands::Upgrade(_) | Commands::Version => false,
         Commands::List(args) if args.json => false,
+        Commands::Registry(args) if matches!(&args.command, cli::RegistryCommands::List(list) if list.json) => {
+            false
+        }
         _ => true,
     }
 }

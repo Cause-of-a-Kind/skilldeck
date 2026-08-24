@@ -98,7 +98,10 @@ pub fn package_name_from_url(value: &str) -> String {
 }
 
 pub fn is_git_url(s: &str) -> bool {
-    s.contains("://") || (s.starts_with("git@") && s.contains(':'))
+    s.contains("://")
+        || s.split_once(':').is_some_and(|(host, path)| {
+            host.contains('@') && !host.contains(['/', '\\']) && !path.is_empty()
+        })
 }
 pub fn is_markdown_url(s: &str) -> bool {
     s.split(['?', '#']).next().unwrap_or(s).ends_with(".md")

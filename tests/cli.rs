@@ -1650,7 +1650,14 @@ fn upgrade_check_current_and_available_exit_success_without_download() {
     let asset = "skilldeck-test.zip";
     let server = TestServer::new(vec![(
         "/releases",
-        release_json("http://placeholder", "v0.1.4", false, false, asset).into_bytes(),
+        release_json(
+            "http://placeholder",
+            &format!("v{}", env!("CARGO_PKG_VERSION")),
+            false,
+            false,
+            asset,
+        )
+        .into_bytes(),
         "application/json",
     )]);
     bin()
@@ -1665,7 +1672,7 @@ fn upgrade_check_current_and_available_exit_success_without_download() {
 
     let server = TestServer::new(vec![(
         "/releases",
-        release_json("http://placeholder", "v0.1.5", false, false, asset).into_bytes(),
+        release_json("http://placeholder", "v99.0.0", false, false, asset).into_bytes(),
         "application/json",
     )]);
     bin()
@@ -1698,7 +1705,7 @@ fn upgrade_actual_current_exe_self_replace_path_keeps_copied_binary_runnable() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.5", false, false, &asset).into_bytes(),
+            release_json("http://placeholder", "v99.0.0", false, false, &asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1746,7 +1753,7 @@ fn upgrade_no_eof_preserves_target_and_yes_replaces_after_checksum() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.5", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v99.0.0", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive.clone(), "application/octet-stream"),
@@ -1798,7 +1805,7 @@ fn upgrade_readonly_target_fails_with_package_manager_caveat() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.5", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v99.0.0", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1835,7 +1842,7 @@ fn upgrade_checksum_mismatch_and_http_failures_preserve_target() {
     let server = TestServer::new(vec![
         (
             "/releases",
-            release_json("http://placeholder", "v0.1.5", false, false, asset).into_bytes(),
+            release_json("http://placeholder", "v99.0.0", false, false, asset).into_bytes(),
             "application/json",
         ),
         ("/archive", archive, "application/octet-stream"),
@@ -1912,7 +1919,7 @@ fn bootstrap_quickstart_explicit_creates_expected_catalog_without_config() {
     let external = fs::read_to_string(dest.join("external-skills.toml")).unwrap();
     assert!(external.contains("https://github.com/Cause-of-a-Kind/skilldeck.git"));
     assert!(external.contains("subdirectory = \"examples/skilldeck-skill\""));
-    assert!(external.contains("ref = \"v0.1.4\""));
+    assert!(external.contains("ref = \"v0.2.0\""));
     assert_eq!(
         fs::read_to_string(dest.join("skill-groups.toml")).unwrap(),
         "[groups.quickstart]\nskills = \"hello-world skilldeck\"\n"
@@ -2197,4 +2204,488 @@ fn bootstrap_creates_nested_paths_with_spaces() {
         .file_name()
         .to_string_lossy()
         .starts_with(".skilldeck-bootstrap-")));
+}
+
+#[test]
+fn multiple_registries_support_qualified_names_defaults_and_listing() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let company = make_catalog(tmp.path(), "company", "shared", "from company");
+    let personal = make_catalog(tmp.path(), "personal", "shared", "from personal");
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["init", "--yes", "--name", "company", "--repository"])
+        .arg(&company)
+        .args(["--reference", "master"])
+        .assert()
+        .success();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "add", "personal"])
+        .arg(&personal)
+        .args(["--reference", "master", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Default registry: company"));
+
+    let default_root = tmp.path().join("default-root");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["install", "--yes", "shared"])
+        .arg(&default_root)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(default_root.join("shared/SKILL.md")).unwrap(),
+        "from company"
+    );
+
+    let personal_root = tmp.path().join("personal-root");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["install", "--yes", "personal:shared"])
+        .arg(&personal_root)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(personal_root.join("shared/SKILL.md")).unwrap(),
+        "from personal"
+    );
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("company:shared"))
+        .stdout(predicate::str::contains("personal:shared"));
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "default", "personal"])
+        .assert()
+        .success();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "rename", "personal", "mine"])
+        .assert()
+        .success();
+    let config = fs::read_to_string(cfg.join("config.toml")).unwrap();
+    assert!(config.contains("default_registry = \"mine\""));
+    assert!(config.contains("[registries.mine]"));
+}
+
+#[test]
+fn adding_registry_migrates_legacy_config_and_keeps_it_default() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    fs::create_dir_all(&cfg).unwrap();
+    let old = make_catalog(tmp.path(), "old", "old-skill", "old");
+    let new = make_catalog(tmp.path(), "new", "new-skill", "new");
+    fs::write(
+        cfg.join("config.toml"),
+        format!(
+            "catalog_repository = {:?}\ncatalog_ref = \"master\"\n",
+            old.display().to_string()
+        ),
+    )
+    .unwrap();
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "add", "personal"])
+        .arg(&new)
+        .args(["--reference", "master", "--existing-as", "company", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Default registry: company"));
+    let config = fs::read_to_string(cfg.join("config.toml")).unwrap();
+    assert!(config.contains("default_registry = \"company\""));
+    assert!(config.contains("[registries.company]"));
+    assert!(config.contains("[registries.personal]"));
+}
+
+#[test]
+fn local_catalog_check_and_add_validate_skill_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let catalog = tmp.path().join("catalog");
+    fs::create_dir_all(catalog.join("skills/broken")).unwrap();
+    fs::write(catalog.join("skills/broken/SKILL.md"), "plain markdown").unwrap();
+    no_external_skills(&catalog);
+    no_skill_groups(&catalog);
+    bin()
+        .args(["catalog", "check"])
+        .arg(&catalog)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("missing YAML frontmatter"));
+    bin()
+        .args(["catalog", "check"])
+        .arg(&catalog)
+        .arg("--strict")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("metadata validation failed"));
+
+    let remote = tmp.path().join("remote");
+    fs::create_dir_all(&remote).unwrap();
+    fs::write(
+        remote.join("SKILL.md"),
+        "---\nname: remote\ndescription: A valid remote skill.\n---\n# Remote\n",
+    )
+    .unwrap();
+    commit_repo(&remote);
+    bin()
+        .args(["catalog", "add", "remote", "--source"])
+        .arg(&remote)
+        .args(["--reference", "master", "--path"])
+        .arg(&catalog)
+        .assert()
+        .success();
+    assert!(fs::read_to_string(catalog.join("external-skills.toml"))
+        .unwrap()
+        .contains("[skills.remote]"));
+}
+
+#[cfg(unix)]
+#[test]
+fn registry_mutations_preserve_stow_style_config_symlink() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let dotfiles = tmp.path().join("dotfiles/config.toml");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::create_dir_all(dotfiles.parent().unwrap()).unwrap();
+    fs::write(
+        &dotfiles,
+        "default_registry = \"old\"\n\n[registries.old]\nrepository = \"repo\"\nref = \"main\"\n",
+    )
+    .unwrap();
+    symlink(&dotfiles, cfg.join("config.toml")).unwrap();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "rename", "old", "company"])
+        .assert()
+        .success();
+    assert!(fs::symlink_metadata(cfg.join("config.toml"))
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert!(fs::read_to_string(&dotfiles)
+        .unwrap()
+        .contains("[registries.company]"));
+}
+
+#[test]
+fn built_in_skill_installs_lists_and_bulk_updates_without_a_registry() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("empty-config");
+    let root = tmp.path().join("skills");
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["list", "--builtins"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("builtin:skilldeck"));
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("builtin:skilldeck"));
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["install", "--yes", "builtin:skilldeck"])
+        .arg(&root)
+        .assert()
+        .success();
+    let installed = root.join("skilldeck/SKILL.md");
+    assert!(fs::read_to_string(&installed)
+        .unwrap()
+        .contains("Skilldeck CLI Skill"));
+    assert!(
+        fs::read_to_string(root.join(".skilldeck/installations.toml"))
+            .unwrap()
+            .contains("kind = \"built-in\"")
+    );
+
+    fs::write(&installed, "outdated").unwrap();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .arg("update")
+        .arg(&root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("built-in skill skilldeck"));
+    assert!(fs::read_to_string(installed)
+        .unwrap()
+        .contains("Skilldeck CLI Skill"));
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "add", "builtin", "unused", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("reserved"));
+}
+
+#[test]
+fn persisted_local_registry_paths_are_absolute() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    make_catalog(tmp.path(), "first", "one", "one");
+    make_catalog(tmp.path(), "second", "two", "two");
+
+    bin()
+        .current_dir(tmp.path())
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args([
+            "init",
+            "--yes",
+            "--name",
+            "first",
+            "--repository",
+            "./first",
+            "--reference",
+            "master",
+        ])
+        .assert()
+        .success();
+    let first_config = fs::read_to_string(cfg.join("config.toml")).unwrap();
+    assert!(first_config.contains(
+        &fs::canonicalize(tmp.path().join("first"))
+            .unwrap()
+            .display()
+            .to_string()
+    ));
+    assert!(!first_config.contains("repository = \"./first\""));
+
+    bin()
+        .current_dir(tmp.path())
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args([
+            "registry",
+            "add",
+            "second",
+            "./second",
+            "--reference",
+            "master",
+            "--yes",
+        ])
+        .assert()
+        .success();
+    let second_config = fs::read_to_string(cfg.join("config.toml")).unwrap();
+    assert!(second_config.contains(
+        &fs::canonicalize(tmp.path().join("second"))
+            .unwrap()
+            .display()
+            .to_string()
+    ));
+}
+
+#[test]
+fn local_flag_reads_uncommitted_catalog_without_changing_registry_config() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let catalog = tmp.path().join("catalog");
+    fs::create_dir_all(catalog.join("skills/demo")).unwrap();
+    fs::write(catalog.join("skills/demo/SKILL.md"), "committed").unwrap();
+    no_external_skills(&catalog);
+    write_skill_groups(&catalog, vec![("test", "demo")]);
+    commit_repo(&catalog);
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["init", "--yes", "--name", "coak", "--repository"])
+        .arg(&catalog)
+        .args(["--reference", "master"])
+        .assert()
+        .success();
+    let config_before = fs::read(cfg.join("config.toml")).unwrap();
+    fs::write(catalog.join("skills/demo/SKILL.md"), "uncommitted v2").unwrap();
+
+    bin()
+        .current_dir(&catalog)
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["list", "coak", "--local"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("working-tree"));
+    bin()
+        .current_dir(&catalog)
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["doctor", "--registry", "coak", "--local"])
+        .assert()
+        .success();
+
+    let remote_root = tmp.path().join("remote-root");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["install", "--yes", "coak:demo"])
+        .arg(&remote_root)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(remote_root.join("demo/SKILL.md")).unwrap(),
+        "committed"
+    );
+
+    let local_root = tmp.path().join("local-root");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["install", "--yes", "coak:demo"])
+        .arg(&local_root)
+        .arg("--local")
+        .arg(&catalog)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(local_root.join("demo/SKILL.md")).unwrap(),
+        "uncommitted v2"
+    );
+    assert!(
+        fs::read_to_string(local_root.join(".skilldeck/installations.toml"))
+            .unwrap()
+            .contains("kind = \"local-catalog\"")
+    );
+
+    let group_root = tmp.path().join("group-root");
+    bin()
+        .current_dir(&catalog)
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["install-group", "--yes", "coak:test"])
+        .arg(&group_root)
+        .arg("--local")
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(group_root.join("demo/SKILL.md")).unwrap(),
+        "uncommitted v2"
+    );
+
+    fs::write(catalog.join("skills/demo/SKILL.md"), "uncommitted v3").unwrap();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .arg("update")
+        .arg(&local_root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("local catalog skill"));
+    assert_eq!(
+        fs::read_to_string(local_root.join("demo/SKILL.md")).unwrap(),
+        "uncommitted v3"
+    );
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["update", "coak:demo"])
+        .arg(&local_root)
+        .assert()
+        .success();
+    assert_eq!(
+        fs::read_to_string(local_root.join("demo/SKILL.md")).unwrap(),
+        "committed"
+    );
+    assert_eq!(fs::read(cfg.join("config.toml")).unwrap(), config_before);
+}
+
+#[test]
+fn registry_management_lifecycle_commands_and_errors() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = tmp.path().join("cfg");
+    let alpha = make_catalog(tmp.path(), "alpha-registry", "alpha", "alpha");
+    let beta = make_catalog(tmp.path(), "beta-registry", "beta", "beta");
+    let replacement = make_catalog(
+        tmp.path(),
+        "replacement-registry",
+        "replacement",
+        "replacement",
+    );
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "add", "alpha"])
+        .arg(&alpha)
+        .args(["--reference", "master", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Default registry: alpha"));
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("default_registry"));
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["config", "path"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("config.toml"));
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "add", "beta"])
+        .arg(&beta)
+        .args(["--reference", "master", "--default", "--yes"])
+        .assert()
+        .success();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "update", "beta", "--repository"])
+        .arg(&replacement)
+        .args(["--reference", "master"])
+        .assert()
+        .success();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "doctor", "beta", "--deep"])
+        .assert()
+        .success();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "doctor", "--all"])
+        .assert()
+        .success();
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "rename", "beta", "renamed"])
+        .assert()
+        .success();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args([
+            "registry",
+            "remove",
+            "renamed",
+            "--new-default",
+            "alpha",
+            "--yes",
+        ])
+        .assert()
+        .success();
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "update", "alpha"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "requires --repository or --reference",
+        ));
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "remove", "alpha", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("only configured registry"));
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", &cfg)
+        .args(["registry", "default", "missing"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("registry not found"));
 }

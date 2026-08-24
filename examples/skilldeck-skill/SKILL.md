@@ -1,6 +1,6 @@
 ---
 name: skilldeck
-description: Use when the user asks to manage agent skills with Skilldeck, inspect or install a Skilldeck catalog, install or remove skills or skill groups, update installed skills, run Skilldeck diagnostics, or understand the difference between skilldeck update and skilldeck upgrade.
+description: Use when the user asks to manage Skilldeck registries or agent skills, inspect or maintain a catalog, install built-in, remote, or local-working-tree skills, update installed skills, run diagnostics, or understand the difference between skilldeck update and skilldeck upgrade.
 ---
 
 # Skilldeck CLI Skill
@@ -9,15 +9,19 @@ Use this skill to help a user operate `skilldeck` safely and predictably. Skilld
 
 ## Core commands
 
-- `skilldeck list` — show catalog skills and groups. Use `--json` for machine-readable output.
-- `skilldeck doctor` — validate the configured catalog. Add `--deep` only when the user wants external Git/Markdown sources resolved too.
-- `skilldeck install <skill-or-git-url> <install-directory>` — install one catalog skill or direct Git source.
+- `skilldeck list` — show default-registry skills and groups. Use `--all` for every registry, `--builtins` for bundled skills, and `--json` for machine-readable output.
+- `skilldeck doctor` — validate the configured default registry. Use `skilldeck registry doctor --all` for all registries.
+- `skilldeck registry list|add|rename|default|update|remove|doctor` — manage named Git-backed registries.
+- `skilldeck catalog check <path> --strict` — validate a local catalog and its skill metadata before committing.
+- `skilldeck catalog add <name> --source <url> --path <path>` — safely add a validated external package.
+- `skilldeck install <skill-or-git-url> <install-directory>` — install one catalog skill or direct Git source. Add `--local [catalog-path]` to test a registry working tree, including uncommitted changes, without changing config.
+- `skilldeck install builtin:skilldeck <install-directory>` — install this bundled skill without a configured registry or network access.
 - `skilldeck install-group <group> <install-directory>` — install every skill in a catalog group.
 - `skilldeck update <install-directory>` — bulk update already installed skills under an install root.
 - `skilldeck update <skill-or-git-url> <install-directory>` — update one installed skill.
 - `skilldeck remove <name> <install-directory>` — remove one installed skill by directory name.
 - `skilldeck remove-group <group> <install-directory>` — remove currently installed members of a catalog group.
-- `skilldeck init --repository <url-or-path> --reference <ref>` — configure the user's catalog.
+- `skilldeck init --name <registry> --repository <url-or-path> --reference <ref>` — configure the user's initial/default registry.
 - `skilldeck bootstrap <path> --quickstart|--empty` — create a new catalog scaffold and, by default, initialize/commit it as a local Git repository on branch `main`.
 - `skilldeck bootstrap <path> --quickstart|--empty --no-git` — generate catalog files only.
 
@@ -41,11 +45,15 @@ When a user asks to get started:
 
 ```sh
 skilldeck bootstrap ./skilldeck-catalog --quickstart
-skilldeck init --repository ./skilldeck-catalog --reference main
+skilldeck init --name default --repository ./skilldeck-catalog --reference main
 skilldeck doctor
 skilldeck install-group quickstart ./installed-skills
 ```
 
 If the user chooses `--no-git`, tell them to run `git init --initial-branch=main`, `git add .`, and `git commit -m "Start Skilldeck catalog"` from inside the generated catalog before configuring Skilldeck. If automatic commit fails because Git identity is missing, explain that files exist and are staged; configure `user.name` and `user.email`, then run that commit command.
+
+Registry-qualified selectors use `<registry>:<skill>`; unqualified names use only the default registry. The reserved `builtin` registry contains skills embedded in the current Skilldeck binary. A one-off `--local [PATH]` acts like a path dependency and records local-working-tree provenance; omit it on a later qualified update to switch back to the configured remote. Legacy single-catalog config migrates when a second registry is added, with the original kept as default.
+
+The global config can be symlinked from a dotfiles repository; use `skilldeck config path` to locate it. Repository authentication remains machine-local.
 
 Adjust paths for the user's shell and operating system. Keep output portable; avoid shell-specific syntax unless the user is already using that shell.
