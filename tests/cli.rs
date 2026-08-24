@@ -2454,13 +2454,15 @@ fn persisted_local_registry_paths_are_absolute() {
         .assert()
         .success();
     let first_config = fs::read_to_string(cfg.join("config.toml")).unwrap();
-    assert!(first_config.contains(
-        &fs::canonicalize(tmp.path().join("first"))
-            .unwrap()
-            .display()
-            .to_string()
-    ));
-    assert!(!first_config.contains("repository = \"./first\""));
+    let parsed: toml::Value = toml::from_str(&first_config).unwrap();
+    let first_repository = parsed["registries"]["first"]["repository"]
+        .as_str()
+        .unwrap();
+    assert!(Path::new(first_repository).is_absolute());
+    assert_eq!(
+        fs::canonicalize(first_repository).unwrap(),
+        fs::canonicalize(tmp.path().join("first")).unwrap()
+    );
 
     bin()
         .current_dir(tmp.path())
@@ -2477,12 +2479,15 @@ fn persisted_local_registry_paths_are_absolute() {
         .assert()
         .success();
     let second_config = fs::read_to_string(cfg.join("config.toml")).unwrap();
-    assert!(second_config.contains(
-        &fs::canonicalize(tmp.path().join("second"))
-            .unwrap()
-            .display()
-            .to_string()
-    ));
+    let parsed: toml::Value = toml::from_str(&second_config).unwrap();
+    let second_repository = parsed["registries"]["second"]["repository"]
+        .as_str()
+        .unwrap();
+    assert!(Path::new(second_repository).is_absolute());
+    assert_eq!(
+        fs::canonicalize(second_repository).unwrap(),
+        fs::canonicalize(tmp.path().join("second")).unwrap()
+    );
 }
 
 #[test]
