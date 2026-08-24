@@ -145,10 +145,20 @@ pub fn normalize_repository(value: &str) -> Result<String> {
     if crate::fsops::is_git_url(value) {
         return Ok(value.to_string());
     }
-    Ok(fs::canonicalize(value)
-        .with_context(|| format!("resolving local repository path {value}"))?
-        .to_string_lossy()
-        .into_owned())
+    let canonical = fs::canonicalize(value)
+        .with_context(|| format!("resolving local repository path {value}"))?;
+    Ok(git_compatible_path(&canonical))
+}
+
+fn git_compatible_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else if let Some(drive) = value.strip_prefix(r"\\?\") {
+        drive.to_string()
+    } else {
+        value.into_owned()
+    }
 }
 
 pub fn validate_registry_name(name: &str) -> Result<()> {
@@ -257,10 +267,15 @@ mod tests {
         );
         assert_eq!(
             normalize_repository(tmp.path().to_str().unwrap()).unwrap(),
-            fs::canonicalize(tmp.path())
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
+            git_compatible_path(&fs::canonicalize(tmp.path()).unwrap())
+        );
+        assert_eq!(
+            git_compatible_path(Path::new(r"\\?\C:\Users\person\catalog")),
+            r"C:\Users\person\catalog"
+        );
+        assert_eq!(
+            git_compatible_path(Path::new(r"\\?\UNC\server\share\catalog")),
+            r"\\server\share\catalog"
         );
     }
 
