@@ -1,6 +1,6 @@
 [package]
 name = "skilldeck"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Cross-platform CLI for installing agent skills from Git-backed catalogs"
@@ -36,6 +36,7 @@ toml = "0.8"
 toml_edit = "0.22"
 serde_yaml = "0.9"
 walkdir = "2"
+minijinja = "2"
 
 [dev-dependencies]
 assert_cmd = "2"

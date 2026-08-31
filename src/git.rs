@@ -1,4 +1,8 @@
-use std::{fmt, path::Path, process::Command};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{anyhow, Context, Result};
 
@@ -70,6 +74,40 @@ fn run_catalog_git(
             detail: if !stderr.is_empty() { stderr } else { stdout },
         })
     }
+}
+
+pub fn repository_root(path: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .with_context(|| "finding Git repository root")?;
+    if !output.status.success() {
+        return Err(anyhow!("not inside a Git repository"));
+    }
+    let root = String::from_utf8(output.stdout)?;
+    Ok(PathBuf::from(root.trim()))
+}
+
+pub fn exclude_path(repository_root: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .output()
+        .with_context(|| "finding repository-local Git exclude file")?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "could not locate repository-local Git exclude file"
+        ));
+    }
+    let path = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        repository_root.join(path)
+    })
 }
 
 pub fn clone_repository(

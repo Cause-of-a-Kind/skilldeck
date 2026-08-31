@@ -230,6 +230,36 @@ fn help_and_version_commands_work() {
 }
 
 #[test]
+fn embedded_docs_match_the_active_binary_and_cover_agent_recipes() {
+    bin().arg("docs").assert().success().stdout(
+        predicate::str::contains(env!("CARGO_PKG_VERSION"))
+            .and(predicate::str::contains("agent"))
+            .and(predicate::str::contains("recipes")),
+    );
+    bin().args(["docs", "agent"]).assert().success().stdout(
+        predicate::str::contains("name: skilldeck")
+            .and(predicate::str::contains("skilldeck docs recipes"))
+            .and(predicate::str::contains("--target pi|codex|claude")),
+    );
+    bin()
+        .args(["docs", "recipes"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("### Composable skill recipes")
+                .and(predicate::str::contains("MiniJinja"))
+                .and(predicate::str::contains("local_inputs"))
+                .and(predicate::str::contains("upstream.frontmatter")),
+        )
+        .stdout(predicate::str::contains("### Maintain a local catalog").not());
+    bin()
+        .args(["docs", "readme"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("# Skilldeck"));
+}
+
+#[test]
 fn init_refuses_to_replace_existing_config_without_force() {
     let f = Fixture::new();
     let cfg = f.tmp.path().join("cfg-init-force");
@@ -2693,4 +2723,578 @@ fn registry_management_lifecycle_commands_and_errors() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("registry not found"));
+}
+
+#[test]
+fn recipe_install_renders_partials_references_and_reuses_locked_values() {
+    let tmp = TempDir::new().unwrap();
+    let catalog = tmp.path().join("catalog");
+    let skill = catalog.join("skills/review");
+    fs::create_dir_all(skill.join("references")).unwrap();
+    fs::create_dir_all(catalog.join("partials/reviews")).unwrap();
+    fs::write(
+        skill.join("recipe.toml"),
+        r#"version = 1
+template = "SKILL.recipe.md"
+
+[inputs.include_security]
+type = "boolean"
+default = true
+
+[inputs.review_style]
+type = "choice"
+choices = ["concise", "detailed"]
+default = "concise"
+
+[inputs.ticket_system]
+type = "string"
+required = true
+example = "Linear"
+
+[local_inputs.model]
+type = "choice"
+prompt = "Default delegated-agent model"
+choices = ["gpt", "claude-opus", "claude-sonnet"]
+default = "claude-sonnet"
+allow_invocation_override = true
+"#,
+    )
+    .unwrap();
+    fs::write(
+        skill.join("SKILL.recipe.md"),
+        r#"---
+name: review
+description: Review changes using project conventions.
+---
+Style: {{ review_style }}
+Tickets: {{ ticket_system }}
+{% if include_security %}Include security checks.{% endif %}
+{% include "partials/reviews/output.recipe.md" %}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        skill.join("references/checklist.recipe.md"),
+        "Configured for {{ ticket_system }}.\n",
+    )
+    .unwrap();
+    fs::write(
+        catalog.join("partials/reviews/output.recipe.md"),
+        "Output findings in priority order.\n",
+    )
+    .unwrap();
+    no_external_skills(&catalog);
+    no_skill_groups(&catalog);
+
+    let root = tmp.path().join("installed");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", tmp.path().join("cfg"))
+        .env("SKILLDECK_CATALOG_REPOSITORY", &catalog)
+        .args(["install", "review"])
+        .arg(&root)
+        .args([
+            "--local",
+            catalog.to_str().unwrap(),
+            "--yes",
+            "--set",
+            "include_security=false",
+            "--set",
+            "model=gpt",
+            "--set",
+            "review_style=detailed",
+            "--set",
+            "ticket_system=Linear",
+        ])
+        .assert()
+        .success();
+
+    let installed = root.join("review");
+    let body = fs::read_to_string(installed.join("SKILL.md")).unwrap();
+    assert!(body.contains("Style: detailed"));
+    assert!(body.contains("Tickets: Linear"));
+    assert!(body.contains("Output findings in priority order."));
+    assert!(!body.contains("Include security checks."));
+    assert!(body.contains("## Before starting: local overrides"));
+    assert!(body.contains("`model` — Default delegated-agent model."));
+    assert!(body.contains("one invocation with `key=value`"));
+    assert_eq!(
+        fs::read_to_string(installed.join("SKILL.local.toml")).unwrap(),
+        "model = \"gpt\"\n"
+    );
+    assert!(
+        fs::read_to_string(installed.join("SKILL.local.example.toml"))
+            .unwrap()
+            .contains("model = \"claude-sonnet\"")
+    );
+    assert!(fs::read_to_string(installed.join(".gitignore"))
+        .unwrap()
+        .contains("/SKILL.local.toml"));
+    git(&root, &["init"]);
+    assert_eq!(
+        git_stdout(&root, &["check-ignore", "review/SKILL.local.toml"]),
+        "review/SKILL.local.toml"
+    );
+    assert_eq!(
+        fs::read_to_string(installed.join("references/checklist.md")).unwrap(),
+        "Configured for Linear."
+    );
+    assert!(!installed.join("recipe.toml").exists());
+    assert!(!installed.join("SKILL.recipe.md").exists());
+    assert!(!installed.join("references/checklist.recipe.md").exists());
+
+    let manifest = fs::read_to_string(root.join(".skilldeck/installations.toml")).unwrap();
+    assert!(manifest.contains("format_version = 1"));
+    assert!(manifest.contains("include_security = false"));
+    assert!(manifest.contains("review_style = \"detailed\""));
+    assert!(manifest.contains("ticket_system = \"Linear\""));
+    assert!(!manifest.contains("model"));
+
+    fs::write(
+        installed.join("SKILL.local.toml"),
+        "model = \"claude-opus\"\n",
+    )
+    .unwrap();
+    fs::write(
+        skill.join("SKILL.recipe.md"),
+        r#"---
+name: review
+description: Review changes using project conventions.
+---
+Updated {{ review_style }} review for {{ ticket_system }}.
+"#,
+    )
+    .unwrap();
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", tmp.path().join("cfg"))
+        .arg("update")
+        .arg(&root)
+        .assert()
+        .success();
+    assert!(fs::read_to_string(installed.join("SKILL.md"))
+        .unwrap()
+        .contains("Updated detailed review for Linear."));
+    assert_eq!(
+        fs::read_to_string(installed.join("SKILL.local.toml")).unwrap(),
+        "model = \"claude-opus\"\n"
+    );
+}
+
+#[test]
+fn recipe_install_prompts_for_required_input_and_set_validates_types() {
+    let tmp = TempDir::new().unwrap();
+    let catalog = tmp.path().join("catalog");
+    let skill = catalog.join("skills/review");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("recipe.toml"),
+        r#"version = 1
+template = "SKILL.recipe.md"
+
+[inputs.ticket_system]
+type = "string"
+prompt = "Ticket system"
+required = true
+example = "Linear"
+"#,
+    )
+    .unwrap();
+    fs::write(
+        skill.join("SKILL.recipe.md"),
+        "---\nname: review\ndescription: Configured review.\n---\nUse {{ ticket_system }}.\n",
+    )
+    .unwrap();
+    no_external_skills(&catalog);
+    no_skill_groups(&catalog);
+    let root = tmp.path().join("installed");
+    fs::create_dir_all(&root).unwrap();
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", tmp.path().join("cfg"))
+        .env("SKILLDECK_CATALOG_REPOSITORY", &catalog)
+        .args(["install", "review"])
+        .arg(&root)
+        .args(["--local", catalog.to_str().unwrap()])
+        .write_stdin("Jira\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Ticket system"));
+    assert!(fs::read_to_string(root.join("review/SKILL.md"))
+        .unwrap()
+        .contains("Use Jira."));
+
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", tmp.path().join("cfg"))
+        .env("SKILLDECK_CATALOG_REPOSITORY", &catalog)
+        .args(["install", "review"])
+        .arg(tmp.path().join("other"))
+        .args([
+            "--local",
+            catalog.to_str().unwrap(),
+            "--yes",
+            "--set",
+            "unknown=value",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown recipe input `unknown`"));
+}
+
+#[test]
+fn strict_catalog_check_reports_recipe_render_errors() {
+    let tmp = TempDir::new().unwrap();
+    let catalog = tmp.path().join("catalog");
+    let skill = catalog.join("skills/broken");
+    fs::create_dir_all(&skill).unwrap();
+    fs::write(
+        skill.join("recipe.toml"),
+        "version = 1\ntemplate = \"SKILL.recipe.md\"\n",
+    )
+    .unwrap();
+    fs::write(
+        skill.join("SKILL.recipe.md"),
+        "---\nname: broken\ndescription: Broken recipe.\n---\n{{ missing_value }}\n",
+    )
+    .unwrap();
+    no_external_skills(&catalog);
+    no_skill_groups(&catalog);
+
+    bin()
+        .args(["catalog", "check"])
+        .arg(&catalog)
+        .arg("--strict")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("undefined value"));
+}
+
+#[test]
+fn external_recipe_wraps_upstream_skill_and_preserves_assets() {
+    let tmp = TempDir::new().unwrap();
+    let external = tmp.path().join("external");
+    fs::create_dir_all(external.join("skills/base")).unwrap();
+    fs::write(
+        external.join("skills/base/SKILL.md"),
+        "---\nname: base\ndescription: Base review.\n---\nBase guidance.\n",
+    )
+    .unwrap();
+    fs::write(external.join("skills/base/checklist.txt"), "keep me").unwrap();
+    commit_repo(&external);
+
+    let catalog = tmp.path().join("catalog");
+    fs::create_dir_all(catalog.join("recipes/company-review")).unwrap();
+    fs::create_dir_all(catalog.join("partials/company")).unwrap();
+    fs::write(
+        catalog.join("recipes/company-review/recipe.toml"),
+        "version = 1\ntemplate = \"SKILL.recipe.md\"\n",
+    )
+    .unwrap();
+    fs::write(
+        catalog.join("recipes/company-review/SKILL.recipe.md"),
+        r#"---
+name: company-review
+description: Company review guidance.
+---
+{% include "partials/company/policy.recipe.md" %}
+{{ upstream.body }}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        catalog.join("partials/company/policy.recipe.md"),
+        "Company policy.\n",
+    )
+    .unwrap();
+    fs::write(
+        catalog.join("external-skills.toml"),
+        format!(
+            "[skills.company-review]\nsource = {:?}\nsubdirectory = \"skills/base\"\nref = \"master\"\nrecipe = \"recipes/company-review/recipe.toml\"\n",
+            external.display().to_string()
+        ),
+    )
+    .unwrap();
+    no_skill_groups(&catalog);
+
+    bin()
+        .args(["catalog", "check"])
+        .arg(&catalog)
+        .args(["--deep", "--strict"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("External company-review: ok"));
+
+    let root = tmp.path().join("installed");
+    bin()
+        .env("SKILLDECK_CONFIG_DIR", tmp.path().join("cfg"))
+        .env("SKILLDECK_CATALOG_REPOSITORY", &catalog)
+        .args(["install", "company-review"])
+        .arg(&root)
+        .args(["--local", catalog.to_str().unwrap(), "--yes"])
+        .assert()
+        .success();
+
+    let body = fs::read_to_string(root.join("company-review/SKILL.md")).unwrap();
+    assert!(body.contains("Company policy."));
+    assert!(body.contains("Base guidance."));
+    assert_eq!(
+        fs::read_to_string(root.join("company-review/checklist.txt")).unwrap(),
+        "keep me"
+    );
+}
+
+#[test]
+fn install_defaults_to_project_agents_skills_and_rejects_ambiguous_scopes() {
+    let f = Fixture::new();
+    let project = f.tmp.path().join("project-default-skills");
+    fs::create_dir_all(&project).unwrap();
+    git(&project, &["init"]);
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "alpha"])
+        .write_stdin("n\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(".agents/skills"));
+    assert!(!project.join(".agents/skills").exists());
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "alpha", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".agents/skills/alpha"));
+    assert!(project.join(".agents/skills/alpha/SKILL.md").is_file());
+    assert!(project
+        .join(".agents/skills/.skilldeck/installations.toml")
+        .is_file());
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "beta", "custom", "--global"])
+        .assert()
+        .failure();
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "beta", "custom", "--claude"])
+        .assert()
+        .failure();
+
+    let outside = f.tmp.path().join("not-a-project");
+    fs::create_dir_all(&outside).unwrap();
+    f.cmd()
+        .current_dir(&outside)
+        .args(["install", "beta", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not find a Git project"));
+}
+
+#[test]
+fn native_targets_install_real_skills_and_warn_about_cross_target_name_collisions() {
+    let f = Fixture::new();
+    let project = f.tmp.path().join("project-native-targets");
+    fs::create_dir_all(&project).unwrap();
+    git(&project, &["init"]);
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "alpha", "--yes"])
+        .assert()
+        .success();
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "alpha", "--target", "pi", "--yes"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("skill `alpha` is also installed")
+                .and(predicate::str::contains(".agents/skills/alpha"))
+                .and(predicate::str::contains("distinct skill name")),
+        );
+    assert!(project.join(".pi/skills/alpha/SKILL.md").is_file());
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "beta", "--target", "claude", "--yes"])
+        .assert()
+        .success();
+    let native_claude = project.join(".claude/skills/beta");
+    assert!(native_claude.join("SKILL.md").is_file());
+    assert!(!fs::symlink_metadata(&native_claude)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    let ignored = Command::new("git")
+        .current_dir(&project)
+        .args(["check-ignore", ".claude/skills/beta"])
+        .output()
+        .unwrap();
+    assert!(!ignored.status.success());
+
+    for (target, relative) in [
+        ("codex", ".codex/skills"),
+        ("gemini", ".gemini/skills"),
+        ("cursor", ".cursor/skills"),
+        ("opencode", ".opencode/skills"),
+    ] {
+        let target_project = f.tmp.path().join(format!("project-target-{target}"));
+        fs::create_dir_all(&target_project).unwrap();
+        git(&target_project, &["init"]);
+        f.cmd()
+            .current_dir(&target_project)
+            .args(["install", "alpha", "--target", target, "--yes"])
+            .assert()
+            .success();
+        assert!(target_project
+            .join(relative)
+            .join("alpha/SKILL.md")
+            .is_file());
+    }
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "beta", "custom", "--target", "pi"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "custom install directory cannot be combined with --target",
+        ));
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "beta", "--target", "pi", "--claude"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--claude is a compatibility alias for --target agents",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_adapter_links_syncs_reports_and_removes_without_git_changes() {
+    let f = Fixture::new();
+    let project = f.tmp.path().join("project-claude-adapter");
+    fs::create_dir_all(&project).unwrap();
+    git(&project, &["init"]);
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "alpha", "--yes", "--claude"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked Claude Code alias"));
+
+    let alpha_alias = project.join(".claude/skills/alpha");
+    assert!(fs::symlink_metadata(&alpha_alias)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        fs::read_link(&alpha_alias).unwrap(),
+        Path::new("../../.agents/skills/alpha")
+    );
+    assert_eq!(
+        git_stdout(&project, &["check-ignore", ".claude/skills/alpha"]),
+        ".claude/skills/alpha"
+    );
+    let exclude = fs::read_to_string(project.join(".git/info/exclude")).unwrap();
+    assert!(exclude.contains("# BEGIN skilldeck claude aliases"));
+    assert!(exclude.contains("/.claude/skills/alpha"));
+    assert!(!exclude.contains("/.claude/skills/\n"));
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "beta", "--yes"])
+        .assert()
+        .success();
+    f.cmd()
+        .current_dir(&project)
+        .args(["harness", "status", "claude"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Missing links:\n  beta"));
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["harness", "sync", "claude"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked skills: 2"));
+    assert!(project.join(".claude/skills/beta").is_symlink());
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["harness", "status", "claude"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked skills: 2"));
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["harness", "remove", "claude"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed 2"));
+    assert!(fs::symlink_metadata(&alpha_alias).is_err());
+    assert!(fs::symlink_metadata(project.join(".claude/skills/beta")).is_err());
+    assert!(!fs::read_to_string(project.join(".git/info/exclude"))
+        .unwrap()
+        .contains("skilldeck claude aliases"));
+
+    fs::create_dir_all(&alpha_alias).unwrap();
+    fs::write(alpha_alias.join("SKILL.md"), "native Claude skill").unwrap();
+    f.cmd()
+        .current_dir(&project)
+        .args(["harness", "sync", "claude"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not the managed alias"));
+    assert_eq!(
+        fs::read_to_string(alpha_alias.join("SKILL.md")).unwrap(),
+        "native Claude skill"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn global_and_claude_flags_stack_under_user_home() {
+    let f = Fixture::new();
+    let home = f.tmp.path().join("isolated-home");
+    fs::create_dir_all(&home).unwrap();
+
+    f.cmd()
+        .env("HOME", &home)
+        .args(["install", "alpha", "--global", "--claude", "--yes"])
+        .assert()
+        .success();
+    assert!(home.join(".agents/skills/alpha/SKILL.md").is_file());
+    assert_eq!(
+        fs::read_link(home.join(".claude/skills/alpha")).unwrap(),
+        Path::new("../../.agents/skills/alpha")
+    );
+
+    f.cmd()
+        .env("HOME", &home)
+        .args(["harness", "status", "claude", "--global"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Linked skills: 1"));
+
+    f.cmd()
+        .env("HOME", &home)
+        .args(["install", "beta", "--global", "--target", "pi", "--yes"])
+        .assert()
+        .success();
+    assert!(home.join(".pi/agent/skills/beta/SKILL.md").is_file());
+
+    f.cmd()
+        .env("HOME", &home)
+        .args([
+            "install", "alpha", "--global", "--target", "opencode", "--yes",
+        ])
+        .assert()
+        .success();
+    assert!(home
+        .join(".config/opencode/skills/alpha/SKILL.md")
+        .is_file());
 }

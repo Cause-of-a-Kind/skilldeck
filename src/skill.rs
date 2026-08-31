@@ -1,12 +1,41 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 struct Frontmatter {
     name: Option<serde_yaml::Value>,
     description: Option<serde_yaml::Value>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ParsedSkill {
+    pub frontmatter: serde_json::Value,
+    pub body: String,
+}
+
+pub fn parse(path: impl AsRef<Path>) -> Result<ParsedSkill> {
+    let path = path.as_ref();
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("reading upstream skill at {}", path.display()))?;
+    parse_text(&text).with_context(|| format!("parsing upstream skill at {}", path.display()))
+}
+
+pub fn parse_text(text: &str) -> Result<ParsedSkill> {
+    let without_bom = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let normalized = without_bom.replace("\r\n", "\n");
+    let rest = normalized
+        .strip_prefix("---\n")
+        .ok_or_else(|| anyhow::anyhow!("SKILL.md is missing YAML frontmatter"))?;
+    let end = rest
+        .find("\n---\n")
+        .ok_or_else(|| anyhow::anyhow!("SKILL.md has unterminated YAML frontmatter"))?;
+    let frontmatter: serde_yaml::Value = serde_yaml::from_str(&rest[..end])?;
+    Ok(ParsedSkill {
+        frontmatter: serde_json::to_value(frontmatter)?,
+        body: rest[end + "\n---\n".len()..].to_string(),
+    })
 }
 
 /// Return portable Agent Skill metadata issues without making catalog loading depend on
@@ -59,6 +88,16 @@ pub fn validate_text(text: &str, expected_name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parsed_skill_separates_frontmatter_and_body() {
+        let parsed =
+            parse_text("---\r\nname: demo\r\ndescription: Demo.\r\n---\r\nBody text.\r\n").unwrap();
+        assert_eq!(parsed.frontmatter["name"], "demo");
+        assert_eq!(parsed.body, "Body text.\n");
+        assert!(parse_text("plain markdown").is_err());
+        assert!(parse_text("---\nname: demo\n").is_err());
+    }
 
     #[test]
     fn metadata_validation_reports_missing_and_mismatched_fields() {
