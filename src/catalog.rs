@@ -18,6 +18,8 @@ pub struct ExternalSkill {
     pub subdirectory: Option<String>,
     #[serde(default, rename = "ref")]
     pub reference: Option<String>,
+    #[serde(default)]
+    pub recipe: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +91,9 @@ impl Catalog {
         })
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
     pub fn first_party_path(&self, name: &str) -> PathBuf {
         self.first_party
             .get(name)
@@ -151,8 +156,25 @@ impl Catalog {
     pub fn metadata_issues(&self) -> Result<Vec<String>> {
         let mut issues = Vec::new();
         for (name, path) in &self.first_party {
-            for issue in crate::skill::validate_file(&path.join("SKILL.md"), name)? {
-                issues.push(format!("first-party skill {name}: {issue}"));
+            if crate::recipe::is_recipe_dir(path) {
+                match crate::recipe::load(path).and_then(|recipe| {
+                    crate::recipe::render(
+                        path,
+                        path,
+                        &self.root,
+                        name,
+                        crate::recipe::validation_values(&recipe),
+                        crate::recipe::validation_local_values(&recipe),
+                    )
+                    .map(|_| ())
+                }) {
+                    Ok(()) => {}
+                    Err(error) => issues.push(format!("first-party skill {name}: {error:#}")),
+                }
+            } else {
+                for issue in crate::skill::validate_file(&path.join("SKILL.md"), name)? {
+                    issues.push(format!("first-party skill {name}: {issue}"));
+                }
             }
         }
         Ok(issues)
@@ -178,8 +200,22 @@ impl Catalog {
             if self.externals.contains_key(name) {
                 issues.push(format!("duplicate first-party/external skill name: {name}"));
             }
-            if !self.first_party_path(name).join("SKILL.md").is_file() {
-                issues.push(format!("first-party skill {name} is missing SKILL.md"));
+            let path = self.first_party_path(name);
+            let has_skill = path.join("SKILL.md").is_file();
+            let has_recipe = crate::recipe::is_recipe_dir(&path);
+            match (has_skill, has_recipe) {
+                (false, false) => issues.push(format!(
+                    "first-party skill {name} is missing SKILL.md or recipe.toml"
+                )),
+                (true, true) => issues.push(format!(
+                    "first-party skill {name} cannot contain both SKILL.md and recipe.toml"
+                )),
+                (false, true) => {
+                    if let Err(error) = crate::recipe::load(&path) {
+                        issues.push(format!("first-party skill {name}: {error:#}"));
+                    }
+                }
+                (true, false) => {}
             }
         }
         for (name, ext) in &self.externals {
@@ -195,6 +231,28 @@ impl Catalog {
                 issues.push(format!(
                     "external skill {name}: direct Markdown sources cannot specify subdirectory or ref"
                 ));
+            }
+            if let Some(recipe) = ext.recipe.as_deref() {
+                if let Err(error) = safe_relative_path(recipe) {
+                    issues.push(format!(
+                        "external skill {name}: unsafe recipe path: {error}"
+                    ));
+                } else {
+                    let manifest = self.root.join(recipe);
+                    if manifest.file_name().and_then(|file| file.to_str())
+                        != Some(crate::recipe::MANIFEST_FILE)
+                    {
+                        issues.push(format!(
+                            "external skill {name}: recipe path must point to recipe.toml"
+                        ));
+                    } else if !manifest.is_file() {
+                        issues.push(format!("external skill {name}: recipe not found: {recipe}"));
+                    } else if let Some(directory) = manifest.parent() {
+                        if let Err(error) = crate::recipe::load(directory) {
+                            issues.push(format!("external skill {name}: {error:#}"));
+                        }
+                    }
+                }
             }
             if let Some(path) = ext
                 .subdirectory

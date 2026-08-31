@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -30,6 +30,10 @@ pub enum Commands {
     Install(InstallArgs),
     /// Install every skill in a catalog group.
     InstallGroup(GroupInstallArgs),
+    /// Manage local compatibility with agent harnesses.
+    Harness(HarnessArgs),
+    /// Print version-matched documentation embedded in this binary.
+    Docs(DocsArgs),
     /// Update one installed skill, or bulk update an install root.
     Update(UpdateArgs),
     /// Upgrade the Skilldeck binary from the latest stable GitHub release.
@@ -111,11 +115,24 @@ pub struct InstallArgs {
     /// Replace an existing destination directory.
     #[arg(long)]
     pub force: bool,
-    /// Create a missing install root without prompting.
+    /// Create a missing install root and accept recipe defaults without prompting.
     #[arg(long)]
     pub yes: bool,
+    /// Set an install-time recipe input (repeatable).
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    pub values: Vec<String>,
+    /// Install in the selected target's global skill directory.
+    #[arg(long, conflicts_with = "install_directory")]
+    pub global: bool,
+    /// Install into a harness-native directory instead of the portable .agents directory.
+    #[arg(long, value_enum, default_value_t = InstallTarget::Agents)]
+    pub target: InstallTarget,
+    /// Also create a local Claude Code alias for a portable agents-target installation.
+    #[arg(long, conflicts_with = "install_directory")]
+    pub claude: bool,
     pub name_or_git_url: String,
-    pub install_directory: PathBuf,
+    /// Custom install root. When omitted, uses the selected target under the Git root.
+    pub install_directory: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -128,14 +145,95 @@ pub struct GroupInstallArgs {
     pub force: bool,
     #[arg(long)]
     pub yes: bool,
+    /// Set recipe inputs; use SKILL.KEY=VALUE to target one group member.
+    #[arg(long = "set", value_name = "[SKILL.]KEY=VALUE")]
+    pub values: Vec<String>,
+    /// Install in the selected target's global skill directory.
+    #[arg(long, conflicts_with = "install_directory")]
+    pub global: bool,
+    /// Install into a harness-native directory instead of the portable .agents directory.
+    #[arg(long, value_enum, default_value_t = InstallTarget::Agents)]
+    pub target: InstallTarget,
+    /// Also create local Claude Code aliases for portable agents-target installations.
+    #[arg(long, conflicts_with = "install_directory")]
+    pub claude: bool,
     pub group: String,
-    pub install_directory: PathBuf,
+    /// Custom install root. When omitted, uses the selected target under the Git root.
+    pub install_directory: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct HarnessArgs {
+    #[command(subcommand)]
+    pub command: HarnessCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HarnessCommands {
+    /// Create missing local aliases for canonical skills.
+    Sync(HarnessScopeArgs),
+    /// Report linked, missing, conflicting, and stale aliases.
+    Status(HarnessScopeArgs),
+    /// Remove only aliases managed from the canonical skill directory.
+    Remove(HarnessScopeArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct HarnessScopeArgs {
+    #[arg(value_enum)]
+    pub harness: HarnessKind,
+    /// Operate on ~/.agents/skills and ~/.claude/skills.
+    #[arg(long)]
+    pub global: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum HarnessKind {
+    Claude,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InstallTarget {
+    /// Portable Agent Skills directory shared by interoperable harnesses.
+    Agents,
+    /// Pi's native skill directory.
+    Pi,
+    /// Codex's native skill directory.
+    Codex,
+    /// Claude Code's native skill directory.
+    Claude,
+    /// Gemini CLI's native skill directory.
+    Gemini,
+    /// Cursor's native skill directory.
+    Cursor,
+    /// OpenCode's native skill directory.
+    Opencode,
+}
+
+#[derive(Args, Debug)]
+pub struct DocsArgs {
+    /// Documentation topic. Omit to list available topics.
+    #[arg(value_enum)]
+    pub topic: Option<DocsTopic>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum DocsTopic {
+    /// Current operational guidance intended for coding agents.
+    Agent,
+    /// Recipe manifests, MiniJinja templates, inputs, and local configuration.
+    Recipes,
+    /// Complete README for this exact Skilldeck build.
+    Readme,
 }
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
     #[command(flatten)]
     pub overrides: CatalogOverrideArgs,
+    /// Override an install-time recipe input for a single-skill update.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    pub values: Vec<String>,
     /// Skill/catalog name or Git URL. Omit for bulk update of an install root.
     pub name_or_git_url: Option<String>,
     /// Install root for single updates. For bulk update, pass it as the only positional argument.

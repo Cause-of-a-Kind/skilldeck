@@ -1,4 +1,4 @@
-# Releasing Skilldeck v0.2.0
+# Releasing Skilldeck v0.3.0
 
 Do not run these steps until the repository exists at `Cause-of-a-Kind/skilldeck` and CI is green.
 
@@ -27,7 +27,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 cargo llvm-cov --workspace --all-targets --all-features --summary-only --fail-under-lines 85
 dist generate --mode ci --check --allow-dirty
-dist plan --tag v0.2.0 --allow-dirty
+dist plan --tag v0.3.0 --allow-dirty
 ```
 
 `--allow-dirty` is only for local planning before the release commit exists. The release tag should be created from a clean, reviewed commit.
@@ -37,15 +37,15 @@ dist plan --tag v0.2.0 --allow-dirty
 Use a semver version tag:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The generated release workflow runs only for version tags matching cargo-dist's semver tag pattern.
 
 ## What cargo-dist creates
 
-For v0.2.0, cargo-dist is configured to create GitHub Release assets for:
+For v0.3.0, cargo-dist is configured to create GitHub Release assets for:
 
 - `skilldeck-installer.sh`
 - `skilldeck-installer.ps1`
@@ -79,7 +79,7 @@ export HOME="$tmp/home"
 export CARGO_HOME="$tmp/cargo-home"
 mkdir -p "$HOME" "$CARGO_HOME"
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.2.0/skilldeck-installer.sh \
+  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.3.0/skilldeck-installer.sh \
   -o "$tmp/skilldeck-installer.sh"
 sh "$tmp/skilldeck-installer.sh"
 PATH="$CARGO_HOME/bin:$PATH" skilldeck version
@@ -93,7 +93,7 @@ $tmp = New-Item -ItemType Directory -Force ([System.IO.Path]::Combine([System.IO
 $env:CARGO_HOME = Join-Path $tmp.FullName "cargo-home"
 New-Item -ItemType Directory -Force $env:CARGO_HOME | Out-Null
 $installer = Join-Path $tmp.FullName "skilldeck-installer.ps1"
-Invoke-RestMethod https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.2.0/skilldeck-installer.ps1 -OutFile $installer
+Invoke-RestMethod https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.3.0/skilldeck-installer.ps1 -OutFile $installer
 & $installer
 $env:PATH = "$(Join-Path $env:CARGO_HOME 'bin');$env:PATH"
 skilldeck version

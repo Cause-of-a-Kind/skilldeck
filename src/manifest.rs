@@ -12,7 +12,7 @@ pub struct Manifest {
     pub skills: BTreeMap<String, Provenance>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Provenance {
     BuiltIn {
@@ -23,10 +23,14 @@ pub enum Provenance {
         name: String,
         catalog_repository: String,
         catalog_ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render: Option<crate::recipe::RenderState>,
     },
     LocalCatalog {
         name: String,
         path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        render: Option<crate::recipe::RenderState>,
     },
     DirectGit {
         repository: String,
@@ -86,6 +90,7 @@ mod tests {
                 name: "alpha".into(),
                 catalog_repository: "repo".into(),
                 catalog_ref: "main".into(),
+                render: None,
             },
         )
         .unwrap();
@@ -95,6 +100,7 @@ mod tests {
             Provenance::LocalCatalog {
                 name: "local-skill".into(),
                 path: "/tmp/catalog".into(),
+                render: None,
             },
         )
         .unwrap();
