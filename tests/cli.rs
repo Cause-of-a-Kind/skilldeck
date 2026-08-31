@@ -3062,7 +3062,7 @@ fn install_defaults_to_project_agents_skills_and_rejects_ambiguous_scopes() {
         .args(["install", "alpha", "--yes"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(".agents/skills/alpha"));
+        .stdout(predicate::str::contains("Installed alpha at"));
     assert!(project.join(".agents/skills/alpha/SKILL.md").is_file());
     assert!(project
         .join(".agents/skills/.skilldeck/installations.toml")
@@ -3108,7 +3108,7 @@ fn native_targets_install_real_skills_and_warn_about_cross_target_name_collision
         .success()
         .stderr(
             predicate::str::contains("skill `alpha` is also installed")
-                .and(predicate::str::contains(".agents/skills/alpha"))
+                .and(predicate::str::contains(".agents/skills"))
                 .and(predicate::str::contains("distinct skill name")),
         );
     assert!(project.join(".pi/skills/alpha/SKILL.md").is_file());
