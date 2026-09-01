@@ -252,8 +252,16 @@ pub struct UpgradeArgs {
 
 #[derive(Args, Debug)]
 pub struct RemoveArgs {
+    /// Installed skill directory name.
     pub name: String,
-    pub install_directory: PathBuf,
+    /// Custom install root. When omitted, uses the selected target under the Git root.
+    pub install_directory: Option<PathBuf>,
+    /// Remove from the selected target's global skill directory.
+    #[arg(long, conflicts_with = "install_directory")]
+    pub global: bool,
+    /// Remove from a harness-native directory instead of the portable .agents directory.
+    #[arg(long, value_enum, default_value_t = InstallTarget::Agents)]
+    pub target: InstallTarget,
 }
 
 #[derive(Args, Debug)]
@@ -261,7 +269,14 @@ pub struct RemoveGroupArgs {
     #[command(flatten)]
     pub overrides: CatalogOverrideArgs,
     pub group: String,
-    pub install_directory: PathBuf,
+    /// Custom install root. When omitted, uses the selected target under the Git root.
+    pub install_directory: Option<PathBuf>,
+    /// Remove from the selected target's global skill directory.
+    #[arg(long, conflicts_with = "install_directory")]
+    pub global: bool,
+    /// Remove from a harness-native directory instead of the portable .agents directory.
+    #[arg(long, value_enum, default_value_t = InstallTarget::Agents)]
+    pub target: InstallTarget,
 }
 
 #[derive(Args, Debug)]

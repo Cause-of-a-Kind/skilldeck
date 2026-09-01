@@ -3090,6 +3090,101 @@ fn install_defaults_to_project_agents_skills_and_rejects_ambiguous_scopes() {
 }
 
 #[test]
+fn remove_and_remove_group_share_project_global_and_target_defaults() {
+    let f = Fixture::new();
+    let project = f.tmp.path().join("project-default-removal");
+    fs::create_dir_all(&project).unwrap();
+    git(&project, &["init"]);
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "alpha", "--yes"])
+        .assert()
+        .success();
+    f.cmd()
+        .current_dir(&project)
+        .args(["remove", "alpha"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed alpha"));
+    assert!(!project.join(".agents/skills/alpha").exists());
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "beta", "--target", "pi", "--yes"])
+        .assert()
+        .success();
+    f.cmd()
+        .current_dir(&project)
+        .args(["remove", "beta", "--target", "pi"])
+        .assert()
+        .success();
+    assert!(!project.join(".pi/skills/beta").exists());
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install-group", "web", "--yes"])
+        .assert()
+        .success();
+    f.cmd()
+        .current_dir(&project)
+        .args(["remove-group", "web"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 removed"));
+    assert!(!project.join(".agents/skills/alpha").exists());
+    assert!(!project.join(".agents/skills/ext").exists());
+
+    let home = f.tmp.path().join("remove-global-home");
+    fs::create_dir_all(&home).unwrap();
+    f.cmd()
+        .env("HOME", &home)
+        .args(["install", "alpha", "--global", "--yes"])
+        .assert()
+        .success();
+    f.cmd()
+        .env("HOME", &home)
+        .args(["remove", "alpha", "--global"])
+        .assert()
+        .success();
+    assert!(!home.join(".agents/skills/alpha").exists());
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["remove", "alpha", "custom", "--global"])
+        .assert()
+        .failure();
+}
+
+#[cfg(unix)]
+#[test]
+fn default_remove_cleans_only_the_matching_managed_claude_alias() {
+    let f = Fixture::new();
+    let project = f.tmp.path().join("project-remove-claude-alias");
+    fs::create_dir_all(&project).unwrap();
+    git(&project, &["init"]);
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["install", "alpha", "--claude", "--yes"])
+        .assert()
+        .success();
+    let alias = project.join(".claude/skills/alpha");
+    assert!(alias.is_symlink());
+
+    f.cmd()
+        .current_dir(&project)
+        .args(["remove", "alpha"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Removed Claude Code alias"));
+    assert!(fs::symlink_metadata(alias).is_err());
+    assert!(!fs::read_to_string(project.join(".git/info/exclude"))
+        .unwrap()
+        .contains("/.claude/skills/alpha"));
+}
+
+#[test]
 fn native_targets_install_real_skills_and_warn_about_cross_target_name_collisions() {
     let f = Fixture::new();
     let project = f.tmp.path().join("project-native-targets");

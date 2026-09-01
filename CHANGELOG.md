@@ -2,6 +2,14 @@
 
 All notable changes to Skilldeck are documented here.
 
+## [Unreleased]
+
+## [0.3.1] - 2026-08-31
+
+### Fixed
+
+- `remove` and `remove-group` now use the same default project, `--global`, native `--target`, and optional custom-root resolution as installation. Portable removal also cleans the matching managed Claude compatibility alias.
+
 ## [0.3.0] - 2026-08-31
 
 ### Added
@@ -20,4 +28,6 @@ All notable changes to Skilldeck are documented here.
 - Install and group-install destination arguments are optional while explicit custom paths remain supported.
 - The bundled `builtin:skilldeck` skill now documents recipes, native targets, Claude compatibility, and the embedded documentation commands.
 
+[Unreleased]: https://github.com/Cause-of-a-Kind/skilldeck/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Cause-of-a-Kind/skilldeck/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Cause-of-a-Kind/skilldeck/compare/v0.2.0...v0.3.0

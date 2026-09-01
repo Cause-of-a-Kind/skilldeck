@@ -179,6 +179,19 @@ impl InstallLocation {
         }
         Ok(())
     }
+
+    pub fn unlink_claude(&self, name: &str) -> Result<()> {
+        let Some(layout) = &self.claude else {
+            return Ok(());
+        };
+        let alias = layout.claude_root.join(name);
+        if managed_alias_matches(&alias, &layout.canonical_root.join(name))? {
+            remove_directory_alias(&alias)
+                .with_context(|| format!("removing Claude alias {}", alias.display()))?;
+            println!("Removed Claude Code alias {}", alias.display());
+        }
+        remove_local_exclude_name(layout, name)
+    }
 }
 
 pub fn status(global: bool) -> Result<HarnessStatus> {
@@ -341,6 +354,29 @@ fn same_skill_path(left: &Path, right: &Path) -> bool {
     )
 }
 
+fn managed_alias_matches(alias: &Path, canonical: &Path) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(alias) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    let target = fs::read_link(alias)?;
+    if target.is_absolute() {
+        return Ok(target == canonical);
+    }
+    let expected_name = canonical
+        .file_name()
+        .ok_or_else(|| anyhow!("canonical skill has no directory name"))?;
+    Ok(target
+        == Path::new("../..")
+            .join(".agents")
+            .join("skills")
+            .join(expected_name))
+}
+
 fn alias_matches(alias: &Path, canonical: &Path) -> Result<bool> {
     let metadata = match fs::symlink_metadata(alias) {
         Ok(metadata) => metadata,
@@ -435,6 +471,37 @@ where
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+    fs::write(path, output)?;
+    Ok(())
+}
+
+fn remove_local_exclude_name(layout: &ClaudeLayout, name: &str) -> Result<()> {
+    let Some(repository_root) = &layout.repository_root else {
+        return Ok(());
+    };
+    let path = crate::git::exclude_path(repository_root)?;
+    if !path.is_file() {
+        return Ok(());
+    }
+    let existing = fs::read_to_string(&path)?;
+    let (outside, mut managed) = parse_exclude_block(&existing)?;
+    managed.remove(&format!("/.claude/skills/{name}"));
+    let mut output = outside.trim_end_matches('\n').to_string();
+    if !managed.is_empty() {
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(BEGIN_EXCLUDES);
+        output.push('\n');
+        for entry in managed {
+            output.push_str(&entry);
+            output.push('\n');
+        }
+        output.push_str(END_EXCLUDES);
+    }
+    if !output.is_empty() {
+        output.push('\n');
     }
     fs::write(path, output)?;
     Ok(())

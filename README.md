@@ -6,17 +6,17 @@ Skilldeck is catalog-agnostic: catalogs can live in public or private Git reposi
 
 ## Install
 
-Install the latest published v0.3.0 GitHub Release on Linux/macOS:
+Install the latest published v0.3.1 GitHub Release on Linux/macOS:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.3.0/skilldeck-installer.sh | sh
+  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.3.1/skilldeck-installer.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.3.0/skilldeck-installer.ps1 | iex
+irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.3.1/skilldeck-installer.ps1 | iex
 ```
 
 Security note: piping installers directly to a shell is convenient but optional. You can download the installer or archive first, inspect it, verify the `.sha256` file or `sha256.sum`, and run it locally.
@@ -88,7 +88,10 @@ skilldeck install herdr-review --target pi
 skilldeck install subagent-review --target claude
 skilldeck install company-codex --target codex --global
 skilldeck install-group pi-workflows --target pi
+skilldeck remove pi-workflow --target pi
 ```
+
+Install, group-install, remove, and group-remove use the same project/global target resolution. Their install-root positional argument remains available only for custom layouts.
 
 Native target installations are ordinary directories, are not automatically ignored, and can be committed to the repository. If the same skill name already exists in another known target, Skilldeck warns that harnesses discovering both locations may report a duplicate or choose one by precedence. Give adaptations distinct names when possible. `--target` cannot be combined with a custom positional install directory.
 
@@ -428,7 +431,11 @@ skilldeck install-group rails ./skills
 
 skilldeck update fin ./skills
 skilldeck update ./skills
+skilldeck remove fin
+skilldeck remove fin --global
+skilldeck remove pi-herdr-flow --target pi
 skilldeck remove fin ./skills
+skilldeck remove-group rails
 skilldeck remove-group rails ./skills
 
 skilldeck upgrade --check
@@ -456,6 +463,8 @@ Remember: `skilldeck update` refreshes installed skills; `skilldeck upgrade` upd
 - Claude compatibility aliases are opt-in, locally Git-excluded, and never overwrite existing Claude skill entries.
 - Native `--target` installs are real, commit-ready skill directories; Skilldeck warns when the same name exists in another known harness location.
 - Installed `.git` directories/files are stripped.
+- `remove` and `remove-group` use the same default, global, native-target, and custom-root resolution as installation.
+- Portable default/global removal also cleans only the matching managed Claude alias; native Claude skills and unrelated paths are untouched.
 - `remove` refuses to delete directories without `SKILL.md`.
 - Bulk update and group removal list updated/removed/skipped entries and summaries.
 - Unrelated directories are left untouched.
@@ -489,9 +498,9 @@ cargo test --workspace --all-targets --all-features
 cargo llvm-cov --workspace --all-targets --all-features --summary-only --fail-under-lines 85
 git diff --check
 dist generate --mode ci --check --allow-dirty
-dist plan --tag v0.3.0 --allow-dirty
+dist plan --tag v0.3.1 --allow-dirty
 ```
 
-GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.3.0` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
+GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.3.1` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
 
 crates.io publishing remains disabled while the CLI surface stabilizes.

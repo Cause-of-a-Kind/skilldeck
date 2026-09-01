@@ -23,8 +23,8 @@ For version-sensitive syntax or behavior, run `skilldeck docs agent` and follow 
 - `skilldeck docs agent|recipes|readme` — print documentation embedded in the active binary without network access.
 - `skilldeck update <install-directory>` — bulk update already installed skills under an install root.
 - `skilldeck update <skill-or-git-url> <install-directory>` — update one installed skill.
-- `skilldeck remove <name> <install-directory>` — remove one installed skill by directory name.
-- `skilldeck remove-group <group> <install-directory>` — remove currently installed members of a catalog group.
+- `skilldeck remove <name> [install-directory]` — remove one installed skill, using the same project/global `--target` defaults as installation. Portable removal also cleans a matching managed Claude alias.
+- `skilldeck remove-group <group> [install-directory]` — remove currently installed group members with the same location resolution.
 - `skilldeck init --name <registry> --repository <url-or-path> --reference <ref>` — configure the user's initial/default registry.
 - `skilldeck bootstrap <path> --quickstart|--empty` — create a new catalog scaffold and, by default, initialize/commit it as a local Git repository on branch `main`.
 - `skilldeck bootstrap <path> --quickstart|--empty --no-git` — generate catalog files only.
