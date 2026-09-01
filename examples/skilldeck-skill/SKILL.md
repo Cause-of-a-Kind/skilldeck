@@ -19,6 +19,7 @@ For version-sensitive syntax or behavior, run `skilldeck docs agent` and follow 
 - `skilldeck install <skill-or-git-url> [install-directory]` — install one catalog skill or direct Git source. Without a directory, use `<git-root>/.agents/skills`; use `--global` for `~/.agents/skills`. Use `--target pi|codex|claude|gemini|cursor|opencode` for a real, commit-ready harness-native installation. Add `--local [catalog-path]` to test a registry working tree, including uncommitted changes, without changing config. Composable recipes accept repeatable `--set KEY=VALUE` inputs.
 - `skilldeck install builtin:skilldeck [install-directory]` — install this bundled skill without a configured registry or network access; use `--global` for the standard global location.
 - `skilldeck install-group <group> [install-directory]` — install every skill in a catalog group, with the same project/global defaults.
+- `skilldeck installed [install-directory]` — list installed skills using the same project/global `--target` and custom-root resolution. Use `--json` for machine-readable output.
 - `skilldeck harness sync|status|remove claude [--global]` — manage opt-in, machine-local Claude Code aliases from canonical `.agents/skills`.
 - `skilldeck docs agent|recipes|readme` — print documentation embedded in the active binary without network access.
 - `skilldeck update <install-directory>` — bulk update already installed skills under an install root.

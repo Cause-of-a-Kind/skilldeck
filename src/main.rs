@@ -33,6 +33,7 @@ fn run() -> Result<()> {
         Commands::Catalog(args) => ops::catalog_command(args),
         Commands::Install(args) => ops::install(args, false),
         Commands::InstallGroup(args) => ops::install_group(args),
+        Commands::Installed(args) => ops::installed(args),
         Commands::Harness(args) => ops::harness(args),
         Commands::Docs(args) => ops::docs(args),
         Commands::Update(args) => ops::update(args),
@@ -59,6 +60,7 @@ fn should_notify_after(command: &Commands) -> bool {
     match command {
         Commands::Upgrade(_) | Commands::Docs(_) | Commands::Version => false,
         Commands::List(args) if args.json => false,
+        Commands::Installed(args) if args.json => false,
         Commands::Registry(args) if matches!(&args.command, cli::RegistryCommands::List(list) if list.json) => {
             false
         }

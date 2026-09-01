@@ -6,17 +6,17 @@ Skilldeck is catalog-agnostic: catalogs can live in public or private Git reposi
 
 ## Install
 
-Install the latest published v0.3.1 GitHub Release on Linux/macOS:
+Install the latest published v0.4.0 GitHub Release on Linux/macOS:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.3.1/skilldeck-installer.sh | sh
+  https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.4.0/skilldeck-installer.sh | sh
 ```
 
 On Windows PowerShell:
 
 ```powershell
-irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.3.1/skilldeck-installer.ps1 | iex
+irm https://github.com/Cause-of-a-Kind/skilldeck/releases/download/v0.4.0/skilldeck-installer.ps1 | iex
 ```
 
 Security note: piping installers directly to a shell is convenient but optional. You can download the installer or archive first, inspect it, verify the `.sha256` file or `sha256.sum`, and run it locally.
@@ -429,6 +429,12 @@ skilldeck docs recipes
 skilldeck install --force fin ./skills
 skilldeck install-group rails ./skills
 
+skilldeck installed
+skilldeck installed --global
+skilldeck installed --target pi
+skilldeck installed ./skills
+skilldeck installed --json
+
 skilldeck update fin ./skills
 skilldeck update ./skills
 skilldeck remove fin
@@ -460,6 +466,7 @@ Remember: `skilldeck update` refreshes installed skills; `skilldeck upgrade` upd
 - Existing skill destinations are not overwritten unless `--force` is passed.
 - Missing install roots prompt `Create it? [y/N]`; default is No. Use `--yes` only in scripts/CI where the path is intentional.
 - Project installs default to `<git-root>/.agents/skills`; global installs selected with `--global` use `~/.agents/skills`.
+- `installed` lists skill directories containing `SKILL.md` with the same project, global, native-target, and custom-root resolution; `--json` provides stable machine-readable output.
 - Claude compatibility aliases are opt-in, locally Git-excluded, and never overwrite existing Claude skill entries.
 - Native `--target` installs are real, commit-ready skill directories; Skilldeck warns when the same name exists in another known harness location.
 - Installed `.git` directories/files are stripped.
@@ -498,9 +505,9 @@ cargo test --workspace --all-targets --all-features
 cargo llvm-cov --workspace --all-targets --all-features --summary-only --fail-under-lines 85
 git diff --check
 dist generate --mode ci --check --allow-dirty
-dist plan --tag v0.3.1 --allow-dirty
+dist plan --tag v0.4.0 --allow-dirty
 ```
 
-GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.3.1` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
+GitHub Releases are configured with cargo-dist. Pushing a version tag such as `v0.4.0` runs the release workflow, builds archives for supported Linux/macOS/Windows targets, generates shell and PowerShell installers, and uploads checksums. See [`RELEASE.md`](./RELEASE.md) for the exact process.
 
 crates.io publishing remains disabled while the CLI surface stabilizes.

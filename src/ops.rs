@@ -1069,6 +1069,78 @@ pub fn install_group(args: GroupInstallArgs) -> Result<()> {
     Ok(())
 }
 
+#[derive(Serialize)]
+struct InstalledOutput {
+    install_root: PathBuf,
+    target: &'static str,
+    scope: &'static str,
+    skills: Vec<String>,
+}
+
+pub fn installed(args: InstalledArgs) -> Result<()> {
+    let scope = if args.install_directory.is_some() {
+        "custom"
+    } else if args.global {
+        "global"
+    } else {
+        "project"
+    };
+    let location = crate::harness::resolve_install_location(
+        args.install_directory.as_deref(),
+        args.global,
+        false,
+        args.target,
+    )?;
+    let mut skills = Vec::new();
+    if location.root.exists() {
+        for entry in fs::read_dir(&location.root)
+            .with_context(|| format!("reading installed skills at {}", location.root.display()))?
+        {
+            let entry = entry?;
+            if entry.path().join("SKILL.md").is_file() {
+                skills.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        skills.sort();
+    }
+    let output = InstalledOutput {
+        install_root: location.root,
+        target: install_target_name(args.target),
+        scope,
+        skills,
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        let noun = if output.skills.len() == 1 {
+            "skill"
+        } else {
+            "skills"
+        };
+        println!(
+            "Found {} installed {noun} in {}",
+            output.skills.len(),
+            output.install_root.display()
+        );
+        for name in output.skills {
+            println!("  {name}");
+        }
+    }
+    Ok(())
+}
+
+fn install_target_name(target: InstallTarget) -> &'static str {
+    match target {
+        InstallTarget::Agents => "agents",
+        InstallTarget::Pi => "pi",
+        InstallTarget::Codex => "codex",
+        InstallTarget::Claude => "claude",
+        InstallTarget::Gemini => "gemini",
+        InstallTarget::Cursor => "cursor",
+        InstallTarget::Opencode => "opencode",
+    }
+}
+
 pub fn update(args: UpdateArgs) -> Result<()> {
     match (args.name_or_git_url, args.install_directory) {
         (Some(root), None) => {
