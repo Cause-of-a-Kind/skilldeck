@@ -30,6 +30,8 @@ pub enum Commands {
     Install(InstallArgs),
     /// Install every skill in a catalog group.
     InstallGroup(GroupInstallArgs),
+    /// List skills installed in a project, global, native, or custom skill directory.
+    Installed(InstalledArgs),
     /// Manage local compatibility with agent harnesses.
     Harness(HarnessArgs),
     /// Print version-matched documentation embedded in this binary.
@@ -160,6 +162,21 @@ pub struct GroupInstallArgs {
     pub group: String,
     /// Custom install root. When omitted, uses the selected target under the Git root.
     pub install_directory: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct InstalledArgs {
+    /// Custom install root. When omitted, uses the selected target under the Git root.
+    pub install_directory: Option<PathBuf>,
+    /// List skills in the selected target's global skill directory.
+    #[arg(long, conflicts_with = "install_directory")]
+    pub global: bool,
+    /// List skills in a harness-native directory instead of the portable .agents directory.
+    #[arg(long, value_enum, default_value_t = InstallTarget::Agents)]
+    pub target: InstallTarget,
+    /// Print stable machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]

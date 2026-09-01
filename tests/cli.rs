@@ -3090,6 +3090,109 @@ fn install_defaults_to_project_agents_skills_and_rejects_ambiguous_scopes() {
 }
 
 #[test]
+fn installed_lists_project_global_native_and_custom_skills() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("installed-project");
+    fs::create_dir_all(project.join(".agents/skills/beta")).unwrap();
+    fs::create_dir_all(project.join(".agents/skills/alpha")).unwrap();
+    fs::create_dir_all(project.join(".agents/skills/not-a-skill")).unwrap();
+    fs::write(project.join(".agents/skills/beta/SKILL.md"), "beta").unwrap();
+    fs::write(project.join(".agents/skills/alpha/SKILL.md"), "alpha").unwrap();
+    git(&project, &["init"]);
+
+    bin()
+        .current_dir(&project)
+        .arg("installed")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("Found 2 installed skills")
+                .and(predicate::str::contains("  alpha\n  beta\n"))
+                .and(predicate::str::contains("not-a-skill").not()),
+        );
+
+    let output = bin()
+        .current_dir(&project)
+        .args(["installed", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["target"], "agents");
+    assert_eq!(json["scope"], "project");
+    assert_eq!(json["skills"], serde_json::json!(["alpha", "beta"]));
+    let reported_root = std::path::PathBuf::from(json["install_root"].as_str().unwrap());
+    assert_eq!(
+        fs::canonicalize(reported_root).unwrap(),
+        fs::canonicalize(project.join(".agents/skills")).unwrap()
+    );
+
+    fs::create_dir_all(project.join(".pi/skills/pi-only")).unwrap();
+    fs::write(project.join(".pi/skills/pi-only/SKILL.md"), "pi").unwrap();
+    bin()
+        .current_dir(&project)
+        .args(["installed", "--target", "pi"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pi-only"))
+        .stdout(predicate::str::contains("alpha").not());
+
+    #[cfg(not(windows))]
+    {
+        let home = tmp.path().join("home");
+        fs::create_dir_all(home.join(".agents/skills/global-only")).unwrap();
+        fs::write(home.join(".agents/skills/global-only/SKILL.md"), "global").unwrap();
+        bin()
+            .env("HOME", &home)
+            .args(["installed", "--global"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("global-only"));
+    }
+    #[cfg(windows)]
+    bin().args(["installed", "--global"]).assert().success();
+
+    let custom = tmp.path().join("custom-skills");
+    fs::create_dir_all(custom.join("custom-only")).unwrap();
+    fs::write(custom.join("custom-only/SKILL.md"), "custom").unwrap();
+    bin()
+        .arg("installed")
+        .arg(&custom)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("custom-only"));
+    bin()
+        .arg("installed")
+        .arg(&custom)
+        .arg("--global")
+        .assert()
+        .failure();
+}
+
+#[test]
+fn installed_reports_an_empty_missing_root_and_requires_a_project_by_default() {
+    let tmp = TempDir::new().unwrap();
+    let project = tmp.path().join("empty-project");
+    fs::create_dir_all(&project).unwrap();
+    git(&project, &["init"]);
+    bin()
+        .current_dir(&project)
+        .arg("installed")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Found 0 installed skills"));
+
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    bin()
+        .current_dir(outside)
+        .arg("installed")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not find a Git project"));
+}
+
+#[test]
 fn remove_and_remove_group_share_project_global_and_target_defaults() {
     let f = Fixture::new();
     let project = f.tmp.path().join("project-default-removal");

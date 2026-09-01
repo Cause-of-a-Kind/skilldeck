@@ -4,6 +4,12 @@ All notable changes to Skilldeck are documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-01
+
+### Added
+
+- `skilldeck installed [install-directory]` lists installed skills with project, `--global`, native `--target`, custom-root, and `--json` support.
+
 ## [0.3.1] - 2026-08-31
 
 ### Fixed
@@ -28,6 +34,7 @@ All notable changes to Skilldeck are documented here.
 - Install and group-install destination arguments are optional while explicit custom paths remain supported.
 - The bundled `builtin:skilldeck` skill now documents recipes, native targets, Claude compatibility, and the embedded documentation commands.
 
-[Unreleased]: https://github.com/Cause-of-a-Kind/skilldeck/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Cause-of-a-Kind/skilldeck/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Cause-of-a-Kind/skilldeck/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/Cause-of-a-Kind/skilldeck/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Cause-of-a-Kind/skilldeck/compare/v0.2.0...v0.3.0
