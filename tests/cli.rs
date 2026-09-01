@@ -3137,16 +3137,20 @@ fn installed_lists_project_global_native_and_custom_skills() {
         .stdout(predicate::str::contains("pi-only"))
         .stdout(predicate::str::contains("alpha").not());
 
-    let home = tmp.path().join("home");
-    fs::create_dir_all(home.join(".agents/skills/global-only")).unwrap();
-    fs::write(home.join(".agents/skills/global-only/SKILL.md"), "global").unwrap();
-    bin()
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .args(["installed", "--global"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("global-only"));
+    #[cfg(not(windows))]
+    {
+        let home = tmp.path().join("home");
+        fs::create_dir_all(home.join(".agents/skills/global-only")).unwrap();
+        fs::write(home.join(".agents/skills/global-only/SKILL.md"), "global").unwrap();
+        bin()
+            .env("HOME", &home)
+            .args(["installed", "--global"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("global-only"));
+    }
+    #[cfg(windows)]
+    bin().args(["installed", "--global"]).assert().success();
 
     let custom = tmp.path().join("custom-skills");
     fs::create_dir_all(custom.join("custom-only")).unwrap();
