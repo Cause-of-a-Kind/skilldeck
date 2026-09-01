@@ -3121,9 +3121,10 @@ fn installed_lists_project_global_native_and_custom_skills() {
     assert_eq!(json["target"], "agents");
     assert_eq!(json["scope"], "project");
     assert_eq!(json["skills"], serde_json::json!(["alpha", "beta"]));
+    let reported_root = std::path::PathBuf::from(json["install_root"].as_str().unwrap());
     assert_eq!(
-        json["install_root"],
-        project.join(".agents/skills").display().to_string()
+        fs::canonicalize(reported_root).unwrap(),
+        fs::canonicalize(project.join(".agents/skills")).unwrap()
     );
 
     fs::create_dir_all(project.join(".pi/skills/pi-only")).unwrap();
