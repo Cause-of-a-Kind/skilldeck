@@ -3142,6 +3142,7 @@ fn installed_lists_project_global_native_and_custom_skills() {
     fs::write(home.join(".agents/skills/global-only/SKILL.md"), "global").unwrap();
     bin()
         .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .args(["installed", "--global"])
         .assert()
         .success()
