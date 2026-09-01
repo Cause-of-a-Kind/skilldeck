@@ -1107,16 +1107,20 @@ pub fn update(args: UpdateArgs) -> Result<()> {
 
 pub fn remove(args: RemoveArgs) -> Result<()> {
     catalog::validate_name(&args.name, "skill")?;
-    remove_one(&args.name, &args.install_directory, true).map(|removed| {
-        if removed {
-            let _ = manifest::forget(&args.install_directory, &args.name);
-            println!(
-                "Removed {} from {}",
-                args.name,
-                args.install_directory.display()
-            );
-        }
-    })
+    let manage_claude_alias =
+        args.install_directory.is_none() && args.target == InstallTarget::Agents;
+    let location = crate::harness::resolve_install_location(
+        args.install_directory.as_deref(),
+        args.global,
+        manage_claude_alias,
+        args.target,
+    )?;
+    if remove_one(&args.name, &location.root, true)? {
+        location.unlink_claude(&args.name)?;
+        let _ = manifest::forget(&location.root, &args.name);
+        println!("Removed {} from {}", args.name, location.root.display());
+    }
+    Ok(())
 }
 
 pub fn doctor(args: DoctorArgs) -> Result<()> {
@@ -1496,6 +1500,15 @@ fn deep_validate_external(
 }
 
 pub fn remove_group(args: RemoveGroupArgs) -> Result<()> {
+    let manage_claude_alias =
+        args.install_directory.is_none() && args.target == InstallTarget::Agents;
+    let location = crate::harness::resolve_install_location(
+        args.install_directory.as_deref(),
+        args.global,
+        manage_claude_alias,
+        args.target,
+    )?;
+    let install_root = &location.root;
     let (group, overrides) = qualified_selector(&args.group, &args.overrides, "group")?;
     catalog::validate_name(&group, "group")?;
     let cfg = config::resolve(&overrides)?;
@@ -1507,15 +1520,16 @@ pub fn remove_group(args: RemoveGroupArgs) -> Result<()> {
     let mut removed = 0;
     let mut skipped = 0;
     for skill in skills {
-        match remove_one(&skill, &args.install_directory, false) {
+        match remove_one(&skill, install_root, false) {
             Ok(true) => {
                 removed += 1;
-                manifest::forget(&args.install_directory, &skill).ok();
-                println!(
-                    "Removed {} from {}",
-                    skill,
-                    args.install_directory.display()
-                );
+                if let Err(error) = location.unlink_claude(&skill) {
+                    println!(
+                        "Warning: removed {skill}, but could not clean its Claude alias: {error:#}"
+                    );
+                }
+                manifest::forget(install_root, &skill).ok();
+                println!("Removed {} from {}", skill, install_root.display());
             }
             Ok(false) => {
                 skipped += 1;
@@ -1529,7 +1543,7 @@ pub fn remove_group(args: RemoveGroupArgs) -> Result<()> {
     }
     println!(
         "Group removal complete: {removed} removed, {skipped} skipped from {}",
-        args.install_directory.display()
+        install_root.display()
     );
     if removed == 0 {
         Err(anyhow!(
